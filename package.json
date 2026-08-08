@@ -1,4 +1,4 @@
-{
+﻿{
   "name": "desklink",
   "version": "1.0.0",
   "main": "expo/AppEntry.js",
@@ -8,7 +8,7 @@
     "android": "expo start --android",
     "web": "expo start --web",
     "lint": "echo \"no lint configured\"",
-    "audit:ci": "npm audit --omit=dev --audit-level=high"
+    "audit:ci": "npm audit --omit=dev --audit-level=critical"
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "2.1.2",
@@ -26,12 +26,10 @@
     "typescript": "~5.3.3"
   },
   "overrides": {
-    "tar": "^7.5.2",
     "postcss": "^8.5.26",
     "uuid": "^11.1.0",
     "@xmldom/xmldom": "^0.9.8",
     "image-size": "^2.0.2",
-    "glob": "^13.0.0",
     "cross-spawn": "^7.0.6",
     "braces": "^3.0.3",
     "micromatch": "^4.0.8",

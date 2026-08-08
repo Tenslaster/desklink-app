@@ -36,6 +36,14 @@ npm view image-size version
 npm audit
 ```
 
+
+### 	ar 6.2.1 (HIGH/CRITICAL — Expo 52 lock)
+
+- Expo SDK 52 / @expo/cli still depends on 	ar@6.2.1 for template extract.
+- Forcing 	ar@7 breaks expo prebuild with: Cannot read properties of undefined (reading '\''extract'\'').
+- Proper fix: upgrade Expo major (SDK 53+) when ready; **not** forced override on SDK 52.
+- Risk is build-tooling / malicious tar archives during install/prebuild, not the signed phone session protocol.
+
 ## iOS build fix (not a vuln)
 
 Xcode 26 + RN 0.76 ships `fmt` 11 which fails `consteval` checks. CI patches Podfile (`CLANG_CXX_LANGUAGE_STANDARD=c++17` for `fmt`) and rewrites `FMT_USE_CONSTEVAL` as belt-and-suspenders.
