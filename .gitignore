@@ -42,3 +42,6 @@ DerivedData/
 .vscode/
 *.swp
 *~
+
+audit.json
+
