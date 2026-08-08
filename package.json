@@ -1,6 +1,6 @@
 {
   "name": "desklink",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "main": "expo/AppEntry.js",
   "scripts": {
     "start": "expo start",
@@ -9,25 +9,31 @@
     "web": "expo start --web"
   },
   "dependencies": {
-    "@react-native-async-storage/async-storage": "2.1.2",
-    "expo": "~52.0.46",
-    "expo-asset": "~11.0.5",
-    "expo-constants": "~17.0.8",
-    "expo-file-system": "~18.0.12",
-    "expo-font": "~13.0.4",
-    "expo-keep-awake": "~14.0.3",
-    "expo-secure-store": "~14.0.1",
-    "expo-status-bar": "~2.0.1",
-    "react": "18.3.1",
-    "react-native": "0.76.9",
-    "react-native-safe-area-context": "4.12.0"
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "expo": "~57.0.11",
+    "expo-asset": "~57.0.9",
+    "expo-constants": "~57.0.9",
+    "expo-file-system": "~57.0.2",
+    "expo-font": "~57.0.1",
+    "expo-keep-awake": "~57.0.1",
+    "expo-secure-store": "~57.0.1",
+    "expo-splash-screen": "~57.0.5",
+    "expo-status-bar": "~57.0.1",
+    "react": "19.2.3",
+    "react-native": "0.86.2",
+    "react-native-safe-area-context": "~5.7.0"
   },
   "devDependencies": {
-    "@babel/core": "^7.25.0",
-    "@types/react": "~18.3.12",
-    "typescript": "~5.3.3"
+    "@babel/core": "^7.26.0",
+    "@types/react": "~19.2.4",
+    "typescript": "~6.0.3"
   },
+  "private": true,
   "overrides": {
+    "uuid": "11.1.1",
+    "image-size": "file:vendor/image-size-patched",
+    "tar": "7.5.22",
+    "@xmldom/xmldom": "0.9.10",
     "postcss": "^8.5.26",
     "cross-spawn": "^7.0.6",
     "braces": "^3.0.3",
@@ -35,7 +41,8 @@
     "semver": "^7.7.2",
     "ws": "^8.18.3",
     "nanoid": "^3.3.11",
-    "cookie": "^0.7.2"
-  },
-  "private": true
+    "cookie": "^0.7.2",
+    "glob": "^11.0.3",
+    "rimraf": "^5.0.10"
+  }
 }
