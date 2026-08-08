@@ -1,49 +1,44 @@
-﻿{
-    "expo":  {
-                 "name":  "DeskLink",
-                 "slug":  "desklink",
-                 "version":  "1.0.0",
-                 "orientation":  "default",
-                 "icon":  "./assets/icon.png",
-                 "userInterfaceStyle":  "dark",
-                 "splash":  {
-                                "image":  "./assets/splash.png",
-                                "resizeMode":  "contain",
-                                "backgroundColor":  "#0B0F14"
-                            },
-                 "ios":  {
-                             "supportsTablet":  true,
-                             "bundleIdentifier":  "com.cedri.desklink",
-                             "infoPlist":  {
-                                               "NSLocalNetworkUsageDescription":  "DeskLink connects to your PC on the local network for remote desktop control.",
-                                               "NSAppTransportSecurity":  {
-                                                                              "NSAllowsArbitraryLoads":  true,
-                                                                              "NSAllowsLocalNetworking":  true
-                                                                          },
-                                               "UIRequiresFullScreen":  false,
-                                               "UIViewControllerBasedStatusBarAppearance":  false,
-                                               "ITSAppUsesNonExemptEncryption":  false
-                                           },
-                             "buildNumber":  "1"
-                         },
-                 "android":  {
-                                 "package":  "com.cedri.desklink",
-                                 "adaptiveIcon":  {
-                                                      "foregroundImage":  "./assets/adaptive-icon.png",
-                                                      "backgroundColor":  "#0B0F14"
-                                                  },
-                                 "permissions":  [
-                                                     "INTERNET",
-                                                     "ACCESS_NETWORK_STATE"
-                                                 ]
-                             },
-                 "plugins":  [
-                                 "expo-secure-store"
-                             ],
-                 "extra":  {
-                               "eas":  {
-                                           "projectId":  "desklink-github-build"
-                                       }
-                           }
-             }
+{
+  "expo": {
+    "name": "DeskLink",
+    "slug": "desklink",
+    "version": "1.0.0",
+    "orientation": "default",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0B0F14"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.cedri.desklink",
+      "buildNumber": "2",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSLocalNetworkUsageDescription": "DeskLink connects to your PC on the local network for remote desktop control.",
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": true,
+          "NSAllowsLocalNetworking": true
+        },
+        "UIRequiresFullScreen": false,
+        "UIViewControllerBasedStatusBarAppearance": false
+      }
+    },
+    "android": {
+      "package": "com.cedri.desklink",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0B0F14"
+      },
+      "permissions": ["INTERNET", "ACCESS_NETWORK_STATE"]
+    },
+    "plugins": ["expo-secure-store"],
+    "extra": {
+      "eas": {
+        "projectId": "desklink-github-build"
+      }
+    }
+  }
 }

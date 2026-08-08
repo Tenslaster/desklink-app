@@ -33,3 +33,10 @@ npx expo start
 ## Bundle ID
 
 `com.cedri.desklink`
+
+## Security notes
+
+- Host passwords are never in this repo (entered only on-device; Secure Store).
+- CI builds an **unsigned** IPA (no Apple cert secrets required).
+- `package.json` uses `overrides` to force patched transitive deps (`tar`, `postcss`, `uuid`, `@xmldom/xmldom`, `image-size`, …).
+- iOS workflow patches `fmt` for **Xcode 26** `consteval` breakage (RN 0.76 / fmt 11).

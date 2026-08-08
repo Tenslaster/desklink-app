@@ -7,7 +7,8 @@
     "ios": "expo start --ios",
     "android": "expo start --android",
     "web": "expo start --web",
-    "lint": "echo \"no lint configured\""
+    "lint": "echo \"no lint configured\"",
+    "audit:ci": "npm audit --omit=dev --audit-level=high"
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "2.1.2",
@@ -23,6 +24,22 @@
     "@babel/core": "^7.25.0",
     "@types/react": "~18.3.12",
     "typescript": "~5.3.3"
+  },
+  "overrides": {
+    "tar": "^7.5.2",
+    "postcss": "^8.5.26",
+    "uuid": "^11.1.0",
+    "@xmldom/xmldom": "^0.9.8",
+    "image-size": "^2.0.2",
+    "glob": "^13.0.0",
+    "cross-spawn": "^7.0.6",
+    "braces": "^3.0.3",
+    "micromatch": "^4.0.8",
+    "semver": "^7.7.2",
+    "ws": "^8.18.3",
+    "send": "^0.19.0",
+    "cookie": "^0.7.2",
+    "nanoid": "^3.3.11"
   },
   "private": true
 }

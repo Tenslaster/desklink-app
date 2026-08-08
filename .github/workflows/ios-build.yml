@@ -103,6 +103,55 @@ jobs:
           fi
           ls -la ios
 
+      # Xcode 26 Apple Clang breaks fmt 11 (RN/RCT-Folly) consteval checks.
+      # Force C++17 for the fmt pod so consteval paths are skipped.
+      - name: Patch Podfile for Xcode 26 fmt consteval
+        if: steps.detect.outputs.type == 'expo'
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          pod = Path("ios/Podfile")
+          text = pod.read_text(encoding="utf-8")
+          marker = "DeskLink Xcode26 fmt fix"
+          if marker in text:
+              print("Podfile already patched")
+              raise SystemExit(0)
+          # Non-f-string: Ruby blocks use { } braces
+          block = """
+    # DeskLink Xcode26 fmt fix: Apple Clang consteval break on fmt 11.x
+    installer.pods_project.targets.each do |target|
+      if target.name == 'fmt'
+        target.build_configurations.each do |config|
+          config.build_settings['CLANG_CXX_LANGUAGE_STANDARD'] = 'c++17'
+          defs = config.build_settings['GCC_PREPROCESSOR_DEFINITIONS']
+          defs = ['$(inherited)'] if defs.nil?
+          defs = [defs] unless defs.is_a?(Array)
+          defs << 'FMT_USE_CONSTEVAL=0' unless defs.any? { |d| d.to_s.include?('FMT_USE_CONSTEVAL') }
+          config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] = defs
+        end
+      end
+      # Align min iOS for resource pods that still advertise 9.0
+      target.build_configurations.each do |config|
+        deployment = config.build_settings['IPHONEOS_DEPLOYMENT_TARGET']
+        if deployment && deployment.to_f < 12.0
+          config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '12.0'
+        end
+      end
+    end
+"""
+          if "post_install do |installer|" in text:
+              text = text.replace(
+                  "post_install do |installer|",
+                  "post_install do |installer|\n" + block,
+                  1,
+              )
+          else:
+              text += "\npost_install do |installer|\n" + block + "\nend\n"
+          pod.write_text(text, encoding="utf-8")
+          print("Patched ios/Podfile for fmt C++17")
+          PY
+
       - name: Restore CocoaPods repo cache only
         uses: actions/cache/restore@v5
         id: pods-cache
@@ -127,6 +176,12 @@ jobs:
           test -d Pods
           test -f Podfile.lock
           echo "Pods OK ($(du -sh Pods | awk '{print $1}'))"
+          # Belt-and-suspenders: rewrite FMT_USE_CONSTEVAL if still auto-detected
+          if [ -f Pods/fmt/include/fmt/base.h ]; then
+            perl -i -pe 's/^#  define FMT_USE_CONSTEVAL 1$/#  define FMT_USE_CONSTEVAL 0/' Pods/fmt/include/fmt/base.h || true
+            echo "fmt base.h consteval patch applied (if present)"
+            grep -n "FMT_USE_CONSTEVAL" Pods/fmt/include/fmt/base.h | head -n 20 || true
+          fi
 
       - name: Install certificate and provisioning profile
         if: inputs.use_signing
