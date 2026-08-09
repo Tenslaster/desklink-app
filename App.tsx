@@ -17,6 +17,7 @@ export default function App() {
   const [screenH, setScreenH] = useState(1080);
   const [latency, setLatency] = useState<number | null>(null);
   const [status, setStatus] = useState('Idle');
+  const [frameCount, setFrameCount] = useState(0);
   const [clientTick, setClientTick] = useState(0);
 
   useEffect(() => {
@@ -31,7 +32,7 @@ export default function App() {
       idle: 'Idle',
       connecting: 'Connecting…',
       authenticating: 'Authenticating…',
-      streaming: 'Live',
+      streaming: 'Connected',
       error: detail || 'Error',
       closed: detail || 'Disconnected',
     };
@@ -58,13 +59,18 @@ export default function App() {
       if (state === 'closed') {
         setSession(false);
         setFrameUri(null);
+        setFrameCount(0);
         deactivateKeepAwake().catch(() => undefined);
       }
     }
   }, []);
 
   const ensureClient = useCallback(() => {
-    if (clientRef.current) return clientRef.current;
+    // Always recreate callbacks binding
+    if (clientRef.current) {
+      clientRef.current.disconnect();
+      clientRef.current = null;
+    }
     const c = new DeskLinkClient({
       onState,
       onFrame: (uri) => setFrameUri(uri),
@@ -74,6 +80,7 @@ export default function App() {
       },
       onLatency: (ms) => setLatency(ms),
       onMessage: () => undefined,
+      onFrameCount: (n) => setFrameCount(n),
     });
     clientRef.current = c;
     setClientTick((n) => n + 1);
@@ -83,9 +90,9 @@ export default function App() {
   const handleConnect = (host: string, port: number, password: string, quality: QualityPreset) => {
     setError(null);
     setFrameUri(null);
+    setFrameCount(0);
     const c = ensureClient();
     c.connect(host, port, password);
-    // Apply quality once streaming; poll briefly
     const stream = qualityToStream(quality);
     const started = Date.now();
     const iv = setInterval(() => {
@@ -103,11 +110,11 @@ export default function App() {
     setSession(false);
     setFrameUri(null);
     setLatency(null);
+    setFrameCount(0);
     setBusy(false);
     deactivateKeepAwake().catch(() => undefined);
   };
 
-  // clientTick forces re-render when client instance is created
   void clientTick;
 
   return (
@@ -121,6 +128,7 @@ export default function App() {
           screenH={screenH}
           latencyMs={latency}
           status={status}
+          frameCount={frameCount}
           onDisconnect={handleDisconnect}
         />
       ) : (
