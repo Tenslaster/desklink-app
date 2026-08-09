@@ -36,9 +36,9 @@ type Props = {
 };
 
 const QUALITY_OPTS: { id: QualityPreset; label: string }[] = [
-  { id: 'smooth', label: '36fps' },
-  { id: 'balanced', label: '30fps' },
-  { id: 'sharp', label: 'Sharp' },
+  { id: 'smooth', label: 'Fluid' },
+  { id: 'balanced', label: 'HD' },
+  { id: 'sharp', label: 'Ultra' },
 ];
 
 export function SessionScreen({
@@ -150,7 +150,7 @@ export function SessionScreen({
                 </Pressable>
               );
             })}
-            <Text style={styles.qHint}>≥30 fps · DXGI GPU</Text>
+            <Text style={styles.qHint}>cursor on · high quality</Text>
           </View>
         ) : null}
       </View>

@@ -87,8 +87,8 @@ export async function markGestureHintSeen(): Promise<void> {
 }
 
 /**
- * All presets target ≥30 fps on LAN for GTX 1050 Ti DXGI + i7-7700.
- * Higher scale/quality = sharper; GPU handles capture via DXGI.
+ * Quality-first presets (readable desktop text on iPhone).
+ * DXGI captures on GPU; encode uses high JPEG + near-native scale.
  */
 export function qualityToStream(preset: QualityPreset): {
   fps: number;
@@ -97,14 +97,14 @@ export function qualityToStream(preset: QualityPreset): {
 } {
   switch (preset) {
     case 'smooth':
-      // Fluid motion, still readable
-      return { fps: 36, scale: 0.52, jpeg_quality: 58 };
+      // Still sharp enough — not the old blurry 0.5 scale
+      return { fps: 28, scale: 0.78, jpeg_quality: 76 };
     case 'sharp':
-      // Max clarity, hard floor 30 fps
-      return { fps: 30, scale: 0.75, jpeg_quality: 74 };
+      // Native-ish resolution, max clarity
+      return { fps: 20, scale: 1.0, jpeg_quality: 88 };
     case 'balanced':
     default:
-      // Default: sharp enough text + solid 30 fps
-      return { fps: 30, scale: 0.62, jpeg_quality: 66 };
+      // Default: clear text, solid motion
+      return { fps: 24, scale: 0.92, jpeg_quality: 84 };
   }
 }

@@ -28,9 +28,9 @@ type Props = {
 };
 
 const PRESETS: { id: QualityPreset; label: string; hint: string }[] = [
-  { id: 'smooth', label: 'Smooth', hint: '36 fps' },
-  { id: 'balanced', label: 'Balanced', hint: '30 fps · best' },
-  { id: 'sharp', label: 'Sharp', hint: '30 fps · HD' },
+  { id: 'smooth', label: 'Fluid', hint: '28 fps · clear' },
+  { id: 'balanced', label: 'HD', hint: '24 fps · recommended' },
+  { id: 'sharp', label: 'Ultra', hint: 'Native · max detail' },
 ];
 
 export function ConnectScreen({ onConnect, busy, error }: Props) {
