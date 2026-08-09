@@ -38,13 +38,13 @@ type Props = {
 };
 
 /**
- * UX (user-confirmed):
- *  • Light tap     → left-click under finger
- *  • 1-finger drag → mouse move (trackpad)
- *  • Pinch         → zoom to see better; STAYS zoomed (no snap-back)
- *  • 2-finger drag while zoomed → pan the view to look around
+ * Real-mouse model on a phone:
+ *  • Light tap     → left-click WHERE THE CURSOR ALREADY IS (no jump)
+ *  • 1-finger drag → move the mouse (trackpad)
+ *  • Long-press    → right-click at cursor (no jump)
+ *  • Pinch         → sticky zoom to see better
+ *  • 2-finger drag while zoomed → pan the view
  *  • 2-finger drag at fit       → remote scroll
- *  • Long-press    → right-click under finger
  */
 function RemoteCanvasImpl({
   uri,
@@ -218,15 +218,9 @@ function RemoteCanvasImpl({
           longTimer.current = setTimeout(() => {
             if (moved.current || multiTouch.current || cursorDriving.current) return;
             longFired.current = true;
-            const n = normFromPoint(
-              touchStart.current.lx,
-              touchStart.current.ly,
-              content.current,
-              stickyZoom.current,
-              panOffset.current,
-            );
-            cursor.current = n;
-            client?.sendPointer('click', n.x, n.y, { button: 'right' });
+            // Right-click at CURRENT mouse position — do not jump to finger
+            const c = cursor.current;
+            client?.sendPointer('click', c.x, c.y, { button: 'right' });
             setBadge('Right-click');
             setTimeout(() => setBadge(null), 350);
           }, LONG_PRESS_MS);
@@ -346,34 +340,25 @@ function RemoteCanvasImpl({
             return;
           }
 
-          // Light press → left click under finger.
-          // Prefer click over a half-started drag: short press + small travel = click
-          // even if MOVE_SLOP was barely crossed (kills jump-without-click).
+          // Light press → left-click AT THE MOUSE CURSOR (like a real mouse button).
+          // Does NOT move/jump the cursor to your finger.
           const wantClick =
             !longFired.current &&
             isTap(dist, duration) &&
             (!cursorDriving.current || dist < 36 || duration < 280);
 
           if (wantClick) {
-            const n = normFromPoint(
-              locationX,
-              locationY,
-              content.current,
-              stickyZoom.current,
-              panOffset.current,
-            );
-            cursor.current = n;
-            // Single click message — host places cursor + SendInput/mouse_event click
+            const c = cursor.current;
             const now = Date.now();
             const dt = now - lastTap.current.t;
             const tapDist = Math.hypot(pageX - lastTap.current.x, pageY - lastTap.current.y);
             if (isDoubleTap(dt, tapDist, lastTap.current.t > 0)) {
-              client?.sendPointer('click', n.x, n.y, { button: 'left' });
-              setTimeout(() => client?.sendPointer('click', n.x, n.y, { button: 'left' }), 50);
+              client?.sendPointer('click', c.x, c.y, { button: 'left' });
+              setTimeout(() => client?.sendPointer('click', c.x, c.y, { button: 'left' }), 50);
               lastTap.current = { t: 0, x: 0, y: 0 };
               setBadge('Double-click');
             } else {
-              client?.sendPointer('click', n.x, n.y, { button: 'left' });
+              client?.sendPointer('click', c.x, c.y, { button: 'left' });
               lastTap.current = { t: now, x: pageX, y: pageY };
               setBadge('Click');
             }
@@ -428,11 +413,11 @@ function RemoteCanvasImpl({
       {hint && uri ? (
         <View style={styles.hint} pointerEvents="none">
           <Text style={styles.hintTitle}>How to use</Text>
-          <Text style={styles.hintLine}>Tap · left-click on the PC</Text>
-          <Text style={styles.hintLine}>Drag 1 finger · move mouse</Text>
-          <Text style={styles.hintLine}>Pinch · zoom in (stays zoomed)</Text>
-          <Text style={styles.hintLine}>2 fingers drag · look around when zoomed</Text>
-          <Text style={styles.hintLine}>Toolbar “Fit” · reset zoom</Text>
+          <Text style={styles.hintLine}>Drag · move the mouse</Text>
+          <Text style={styles.hintLine}>Tap · left-click (at the mouse, no jump)</Text>
+          <Text style={styles.hintLine}>Long-press · right-click at mouse</Text>
+          <Text style={styles.hintLine}>Pinch · zoom to see better (stays)</Text>
+          <Text style={styles.hintLine}>2 fingers · pan when zoomed</Text>
         </View>
       ) : null}
 
