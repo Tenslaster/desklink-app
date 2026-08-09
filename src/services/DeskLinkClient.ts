@@ -1,6 +1,7 @@
 import {
   decodeMsg,
   encodeMsg,
+  extractFrameBase64,
   frameDataToUri,
   jpegBytesToUri,
   unpackFrame,
@@ -25,7 +26,8 @@ export type ClientEvents = {
   onFrameTimeout?: (seconds: number) => void;
 };
 
-const MOVE_HZ = 90;
+/** High rate so trackpad drag feels 1:1 with finger */
+const MOVE_HZ = 160;
 const MOVE_MIN_MS = 1000 / MOVE_HZ;
 
 export class DeskLinkClient {
@@ -46,6 +48,8 @@ export class DeskLinkClient {
   private lastMoveAt = 0;
   private pendingMove: { x: number; y: number } | null = null;
   private moveFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  private latencyEma = 0;
+  private adaptiveAt = 0;
   /** Reused pointer payload to cut GC pressure */
   private readonly moveMsg = {
     type: 'pointer' as const,
@@ -84,6 +88,8 @@ export class DeskLinkClient {
     this.rafScheduled = false;
     this.lastMoveAt = 0;
     this.pendingMove = null;
+    this.latencyEma = 0;
+    this.adaptiveAt = 0;
 
     const cleanHost = host.trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
     const url = `ws://${cleanHost}:${port}`;
@@ -114,6 +120,12 @@ export class DeskLinkClient {
       if (this.disposed) return;
       const data = ev.data;
       if (typeof data === 'string') {
+        // HOT PATH: frames are huge — never JSON.parse them
+        const b64 = extractFrameBase64(data);
+        if (b64 !== null) {
+          this.emitUri(frameDataToUri(b64), b64.length);
+          return;
+        }
         const msg = decodeMsg(data);
         if (msg) this.handleJson(msg);
         return;
@@ -169,7 +181,7 @@ export class DeskLinkClient {
   }
 
   private handleJson(msg: ServerMsg): void {
-    // Frame first — hottest path
+    // Legacy fallback if extractFrameBase64 missed a variant
     if (msg.type === 'frame') {
       const data = (msg as { data?: string }).data;
       if (typeof data === 'string' && data.length > 0) {
@@ -220,12 +232,33 @@ export class DeskLinkClient {
       case 'pong': {
         const m = msg as { t?: number };
         if (typeof m.t === 'number') {
-          this.events.onLatency(Math.max(0, Date.now() - m.t));
+          const ms = Math.max(0, Date.now() - m.t);
+          this.latencyEma = this.latencyEma <= 0 ? ms : this.latencyEma * 0.7 + ms * 0.3;
+          this.events.onLatency(ms);
+          this.maybeAdaptQuality();
         }
         return;
       }
       default:
         return;
+    }
+  }
+
+  /**
+   * If Wi‑Fi latency climbs, gently ease quality so frames keep flowing.
+   * Manual quality chips always win until the next auto nudge.
+   */
+  private maybeAdaptQuality(): void {
+    if (this.state !== 'streaming') return;
+    const now = Date.now();
+    if (now - this.adaptiveAt < 4000) return;
+    if (this.latencyEma < 90) return;
+    this.adaptiveAt = now;
+    // Mild ease — host also auto-eases encode when slow
+    if (this.latencyEma >= 140) {
+      this.setQuality({ fps: 24, scale: 0.74, jpeg_quality: 72 });
+    } else {
+      this.setQuality({ fps: 28, scale: 0.8, jpeg_quality: 76 });
     }
   }
 
@@ -235,6 +268,16 @@ export class DeskLinkClient {
     this.events.onFrameCount?.(this.frames);
     this.pendingUri = uri;
     this.pendingBytes = bytes;
+    // First few frames: paint ASAP (no RAF wait) so session never "blank"
+    if (this.frames <= 2) {
+      this.rafScheduled = false;
+      const next = this.pendingUri;
+      const b = this.pendingBytes;
+      this.pendingUri = null;
+      this.pendingBytes = 0;
+      this.events.onFrame(next, b);
+      return;
+    }
     if (this.rafScheduled) return;
     this.rafScheduled = true;
     const flush = () => {
@@ -295,7 +338,6 @@ export class DeskLinkClient {
     const { x, y } = this.pendingMove;
     this.pendingMove = null;
     this.lastMoveAt = Date.now();
-    // Reuse object shape
     this.moveMsg.x = x;
     this.moveMsg.y = y;
     this.send(this.moveMsg as unknown as Record<string, unknown>);
@@ -361,7 +403,7 @@ export class DeskLinkClient {
     this.stopPing();
     this.pingTimer = setInterval(() => {
       this.send({ type: 'ping', t: Date.now() });
-    }, 5000);
+    }, 4000);
   }
 
   private stopPing(): void {
@@ -377,7 +419,7 @@ export class DeskLinkClient {
     this.frameWatchTimer = setInterval(() => {
       if (this.state !== 'streaming') return;
       if (this.frames > 0) {
-        if (this.msSinceLastFrame > 4000) this.send({ type: 'keyframe' });
+        if (this.msSinceLastFrame > 3500) this.send({ type: 'keyframe' });
         return;
       }
       const waited = Math.round((Date.now() - this.connectedAt) / 1000);
@@ -386,7 +428,7 @@ export class DeskLinkClient {
         lastAlert = waited;
         this.events.onFrameTimeout?.(waited);
       }
-    }, 2000);
+    }, 1800);
   }
 
   private stopFrameWatch(): void {

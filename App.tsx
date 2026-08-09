@@ -96,7 +96,8 @@ export default function App() {
       onMessage: () => undefined,
       onFrameCount: (n) => {
         frameCountTick.current = n;
-        if (n === 1 || n % 8 === 0) {
+        // Throttle React state — every 12 frames is enough for the HUD
+        if (n === 1 || n % 12 === 0) {
           setFrameCount(n);
         }
       },

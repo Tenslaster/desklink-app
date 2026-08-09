@@ -64,13 +64,15 @@ console.log('\n=== DeskLink gesture policy tests ===\n');
 // Trackpad: drag = mouse move; tap = click
 assert(g.clickMovesCursor() === false, 'tap does not continuously move cursor');
 assert(g.shouldStartCursorMove(5) === false, 'small travel → still a tap');
-assert(g.shouldStartCursorMove(40) === true, 'past slop → mouse drag');
+assert(g.shouldStartCursorMove(20) === true, 'past slop → mouse drag');
 const cur0 = { x: 0.5, y: 0.5 };
 const dlt = g.trackpadDelta(100, 0, 400, 300, 1);
 const cur1 = g.applyTrackpadMove(cur0, dlt.dx, dlt.dy);
 assert(cur1.x > 0.5 && cur1.y === 0.5, 'drag right moves mouse x');
+// Sensitivity should feel snappy (>> old 1.15)
+assert(dlt.dx > 0.5, 'trackpad sensitivity high enough for snappy move');
 assert(g.isTap(8, 120) === true, 'light press = tap/click');
-assert(g.isTap(40, 120) === false, 'big travel = not tap');
+assert(g.isTap(50, 120) === false, 'big travel = not tap');
 
 // 1 finger = mouse, never local pan
 assert(g.oneFingerPansView(1) === false, '1 finger never pans view');
@@ -78,22 +80,41 @@ assert(g.oneFingerPansView(2) === false, '1 finger still mouse when zoomed');
 assert(g.resolveFingerMode(1, 1, 1, false) === 'mouse', '1 finger → mouse');
 assert(g.resolveFingerMode(1, 2.5, 1, false) === 'mouse', '1 finger zoomed → mouse');
 
-// 2 fingers
+// 2 fingers: scroll at any zoom (view auto-follows cursor); pinch when scaling
 assert(g.resolveFingerMode(2, 1, 1, false) === 'scroll', '2f fit → scroll');
-assert(g.resolveFingerMode(2, 2, 1, false) === 'view_pan', '2f zoomed → view pan');
+assert(g.resolveFingerMode(2, 2, 1, false) === 'scroll', '2f zoomed → scroll (not pan)');
 assert(g.resolveFingerMode(2, 2, 1.05, false) === 'pinch', '2f scale change → pinch');
 assert(g.resolveFingerMode(2, 1, 1, true) === 'pinch', 'pinch stays locked');
 
-// Sticky incremental zoom (no snap-back to start)
-let z = 1;
-z = g.zoomFromFrameRatio(z, 1.2);
-z = g.zoomFromFrameRatio(z, 1.2);
-assert(z > 1.4, 'incremental pinch grows zoom');
-// fingers collapse on release used to reset; frame ratio 1 must not wipe zoom
-const held = g.zoomFromFrameRatio(z, 1.0);
-assert(held === z, 'ratio 1 keeps zoom (no snap-back)');
+// Zoom follows cursor → pan keeps cursor at screen center
+const follow = g.panToFollowCursor(
+  { x: 0.5, y: 0.5 },
+  { x: 0, y: 0, w: 200, h: 100 },
+  { w: 200, h: 100 },
+  2,
+);
+assert(Math.abs(follow.x) < 0.01 && Math.abs(follow.y) < 0.01, 'center cursor → zero pan');
+const followCorner = g.panToFollowCursor(
+  { x: 0, y: 0 },
+  { x: 0, y: 0, w: 200, h: 100 },
+  { w: 200, h: 100 },
+  2,
+);
+assert(followCorner.x > 0 && followCorner.y > 0, 'top-left cursor → positive pan to center');
+assert(g.scrollStepsFromDelta(40) > 0, 'finger up → scroll up steps');
+assert(g.scrollStepsFromDelta(-40) < 0, 'finger down → scroll down steps');
+
+// Sticky pinch from start distance (stable, no cumulative glitch)
+const zPinch = g.zoomFromPinchStart(1, 100, 180);
+assert(zPinch === 1.8, 'pinch start→dist maps cleanly');
+const zHeld = g.zoomFromPinchStart(2, 100, 100);
+assert(zHeld === 2, 'same dist keeps zoom (no snap-back)');
 assert(g.clampZoom(0.5) === 1, 'clampZoom floor 1');
 assert(g.clampZoom(9) === 4, 'clampZoom ceil 4');
+
+// Mild zoom damping — still movable when zoomed
+const dltZ = g.trackpadDelta(100, 0, 400, 300, 2);
+assert(dltZ.dx > 0.35, 'zoomed trackpad still reasonably fast');
 
 // Pan reset at fit
 assert(

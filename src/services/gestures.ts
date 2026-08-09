@@ -2,31 +2,36 @@
  * DeskLink touch policy (pure, unit-tested).
  *
  * 1 finger:
- *   - Light tap   → left-click under finger
+ *   - Light tap   → left-click at cursor (no jump)
  *   - Drag        → mouse move (trackpad) after slop
- *   - Long-press  → right-click under finger
+ *   - Long-press  → right-click at cursor
  * 2 fingers:
- *   - Pinch       → sticky zoom (incremental, no snap-back on release)
- *   - Drag zoomed → pan the local view (look around after zoom)
- *   - Drag at fit → remote scroll
+ *   - Pinch       → sticky zoom (from start distance, no snap-back)
+ *   - Vertical drag → mouse-wheel scroll (works at any zoom)
+ *
+ * When zoomed, the view auto-centers on the remote cursor so you always
+ * see what you're controlling (no manual pan needed).
  */
 
 /**
- * Drag (mouse move) only after a clear slide.
- * Keep this HIGH so a light press with tiny jitter never becomes a drag
- * (that was causing jump-without-click).
+ * Drag starts after a short slide — low enough to feel instant,
+ * high enough that a light tap never becomes a drag.
  */
-export const MOVE_SLOP_PX = 36;
+export const MOVE_SLOP_PX = 16;
 /** Light press may jitter — still a click if under this and short enough. */
 export const TAP_SLOP_PX = 40;
 export const TAP_MAX_MS = 600;
 export const LONG_PRESS_MS = 480;
 export const DOUBLE_TAP_MS = 300;
 export const DOUBLE_TAP_SLOP_PX = 36;
-export const PINCH_FRAME_EPS = 0.02;
-export const SCROLL_STEP_PX = 24;
+/** Larger eps so tiny finger jitter doesn't fight pan/scroll. */
+export const PINCH_FRAME_EPS = 0.035;
+export const SCROLL_STEP_PX = 16;
+/** Slightly easier to start a scroll gesture */
+export const SCROLL_DEADZONE_PX = 6;
 export const VIEW_PAN_MIN_ZOOM = 1.05;
-export const TRACKPAD_SENSITIVITY = 1.15;
+/** Snappy trackpad feel (was 1.15 — felt like a turtle). */
+export const TRACKPAD_SENSITIVITY = 2.45;
 
 export type FingerMode = 'mouse' | 'view_pan' | 'scroll' | 'pinch';
 
@@ -37,18 +42,28 @@ export function resolveFingerMode(
   pinchLocked: boolean,
 ): FingerMode {
   if (touchCount >= 2) {
+    // Once pinching, stay on pinch until release (avoids zoom/pan fighting)
     if (pinchLocked || Math.abs(frameRatio - 1) > PINCH_FRAME_EPS) {
       return 'pinch';
     }
-    if (zoom > VIEW_PAN_MIN_ZOOM) {
-      return 'view_pan';
-    }
+    // 2-finger drag = mouse wheel at any zoom (view auto-follows cursor)
+    void zoom;
     return 'scroll';
   }
   return 'mouse';
 }
 
-/** Frame-to-frame pinch — never recomputes from gesture start (no snap-back). */
+/**
+ * Absolute pinch from gesture start — stable, no cumulative float drift.
+ * (Frame-to-frame ratios jitter and glitch.)
+ */
+export function zoomFromPinchStart(startZoom: number, startDist: number, dist: number): number {
+  if (!Number.isFinite(startDist) || startDist <= 1) return clampZoom(startZoom);
+  if (!Number.isFinite(dist) || dist <= 0) return clampZoom(startZoom);
+  return clampZoom(startZoom * (dist / startDist));
+}
+
+/** Frame-to-frame pinch — kept for tests / legacy. Prefer zoomFromPinchStart. */
 export function zoomFromFrameRatio(currentZoom: number, frameRatio: number): number {
   if (!Number.isFinite(frameRatio) || frameRatio <= 0) return clampZoom(currentZoom);
   return clampZoom(currentZoom * frameRatio);
@@ -69,6 +84,11 @@ export function shouldStartCursorMove(movedPx: number): boolean {
   return movedPx > MOVE_SLOP_PX;
 }
 
+/**
+ * Map finger pixels → normalized desktop delta.
+ * Mild zoom damping only (full /zoom made zoomed control unusable).
+ * Light acceleration on faster flicks.
+ */
 export function trackpadDelta(
   dxPx: number,
   dyPx: number,
@@ -77,12 +97,16 @@ export function trackpadDelta(
   zoom: number,
   sensitivity: number = TRACKPAD_SENSITIVITY,
 ): { dx: number; dy: number } {
-  const z = Math.max(0.001, zoom);
   const w = Math.max(1, contentW);
   const h = Math.max(1, contentH);
+  // Only slightly slower when zoomed so you can still aim fine details
+  const zDamp = 1 + Math.max(0, zoom - 1) * 0.28;
+  const mag = Math.hypot(dxPx, dyPx);
+  const accel = mag > 10 ? 1 + Math.min(1.6, (mag - 10) / 28) : 1;
+  const s = sensitivity * accel;
   return {
-    dx: (dxPx * sensitivity) / (w * z),
-    dy: (dyPx * sensitivity) / (h * z),
+    dx: (dxPx * s) / (w * zDamp),
+    dy: (dyPx * s) / (h * zDamp),
   };
 }
 
@@ -98,16 +122,56 @@ export function applyTrackpadMove(
 }
 
 export function clampZoom(z: number): number {
-  return Math.max(1, Math.min(4, Math.round(z * 100) / 100));
+  // Finer steps than 0.01 rounding thrash — keep 2 decimals for UI stability
+  const c = Math.max(1, Math.min(4, z));
+  return Math.round(c * 100) / 100;
 }
 
 export function zoomFromPinch(startZoom: number, ratio: number): number {
   return clampZoom(startZoom * ratio);
 }
 
+/**
+ * Map vertical 2-finger drag to mouse-wheel steps.
+ * Positive dy (finger up) → scroll up (content moves up / wheel away) = negative wheel
+ * on Windows? Windows: positive WHEEL delta scrolls UP (content down in browser).
+ * Host uses dy * WHEEL_DELTA; we send positive for finger-up (natural: content follows finger).
+ */
 export function scrollStepsFromDelta(dyPx: number): number {
-  if (Math.abs(dyPx) < 10) return 0;
-  return Math.max(-4, Math.min(4, Math.round(dyPx / SCROLL_STEP_PX)));
+  if (Math.abs(dyPx) < SCROLL_DEADZONE_PX) return 0;
+  // Finger moves up → positive steps (scroll up); down → negative
+  return Math.max(-8, Math.min(8, Math.round(dyPx / SCROLL_STEP_PX)));
+}
+
+/**
+ * Pan the zoomed stage so the remote cursor sits at the phone screen center.
+ * RN transforms scale around the view center, then translate is applied first
+ * in our transform list (translate then scale) — wait: order is
+ *   [translateX, translateY, scale]
+ * which means scale is applied first in matrix multiplication (rightmost),
+ * then translate. In RN, transforms apply right-to-left: scale then translate.
+ * So screenPos = pan + (local - center) * zoom + center
+ * For cursor local point L to land on layout center C:
+ *   C = pan + (L - C) * zoom + C  =>  pan = -(L - C) * zoom
+ */
+export function panToFollowCursor(
+  cursor: { x: number; y: number },
+  content: { x: number; y: number; w: number; h: number },
+  layout: { w: number; h: number },
+  zoom: number,
+): { x: number; y: number } {
+  if (zoom <= VIEW_PAN_MIN_ZOOM) {
+    return { x: 0, y: 0 };
+  }
+  const z = Math.max(0.001, zoom);
+  const lx = content.x + cursor.x * content.w;
+  const ly = content.y + cursor.y * content.h;
+  const cx = layout.w / 2;
+  const cy = layout.h / 2;
+  return {
+    x: -(lx - cx) * z,
+    y: -(ly - cy) * z,
+  };
 }
 
 /** Light press on phone → left click (forgiving jitter). */

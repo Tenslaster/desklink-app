@@ -97,14 +97,14 @@ export function qualityToStream(preset: QualityPreset): {
 } {
   switch (preset) {
     case 'smooth':
-      // Still sharp enough — not the old blurry 0.5 scale
-      return { fps: 28, scale: 0.78, jpeg_quality: 76 };
+      // Fluid: max snappy cursor + stream
+      return { fps: 36, scale: 0.78, jpeg_quality: 76 };
     case 'sharp':
       // Native-ish resolution, max clarity
-      return { fps: 20, scale: 1.0, jpeg_quality: 88 };
+      return { fps: 22, scale: 1.0, jpeg_quality: 86 };
     case 'balanced':
     default:
       // Default: clear text, solid motion
-      return { fps: 24, scale: 0.92, jpeg_quality: 84 };
+      return { fps: 28, scale: 0.88, jpeg_quality: 80 };
   }
 }

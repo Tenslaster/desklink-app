@@ -13,8 +13,46 @@ export type ServerMsg =
   | { type: 'prefer_ok'; binary?: boolean }
   | { type: string; [k: string]: unknown };
 
+/** Fixed host envelope — must match host protocol._FRAME_JSON_PREFIX/SUFFIX */
+export const FRAME_JSON_PREFIX = '{"type":"frame","mime":"image/jpeg","data":"';
+export const FRAME_JSON_SUFFIX = '"}';
+
 export function encodeMsg(obj: Record<string, unknown>): string {
   return JSON.stringify(obj);
+}
+
+/**
+ * Fast-path: extract bare base64 from a frame JSON without JSON.parse.
+ * JSON.parse on 100–250KB frame strings is a major JS thread cost on iPhone.
+ * Returns null if the message is not a fixed-shape frame envelope.
+ */
+export function extractFrameBase64(raw: string): string | null {
+  const n = raw.length;
+  const pref = FRAME_JSON_PREFIX.length;
+  const suf = FRAME_JSON_SUFFIX.length;
+  if (n < pref + suf + 8) return null;
+  // Quick reject: first bytes of {"type":"frame"...
+  if (raw.charCodeAt(0) !== 123 /* { */) return null;
+  if (raw.charCodeAt(2) !== 116 /* t of type */) return null;
+  // Exact prefix match (host always uses this shape)
+  if (!raw.startsWith(FRAME_JSON_PREFIX)) {
+    // Tolerate minor whitespace-free variants with "type":"frame"
+    if (raw.indexOf('"type":"frame"') < 0) return null;
+    const marker = '"data":"';
+    const i = raw.indexOf(marker);
+    if (i < 0) return null;
+    const start = i + marker.length;
+    const end = raw.lastIndexOf('"');
+    if (end <= start) return null;
+    return raw.slice(start, end);
+  }
+  if (!raw.endsWith(FRAME_JSON_SUFFIX)) {
+    // trailing whitespace
+    const end = raw.lastIndexOf('"');
+    if (end <= pref) return null;
+    return raw.slice(pref, end);
+  }
+  return raw.slice(pref, n - suf);
 }
 
 export function decodeMsg(raw: string): ServerMsg | null {
@@ -55,7 +93,7 @@ const B64 =
 export function uint8ToBase64(bytes: Uint8Array): string {
   const len = bytes.length;
   if (len === 0) return '';
-  const parts = new Array<string>((len / 3 + 1) | 0);
+  const parts = new Array<string>(((len / 3) | 0) + 2);
   let p = 0;
   let i = 0;
   for (; i + 2 < len; i += 3) {
@@ -86,6 +124,6 @@ export function jpegBytesToUri(jpeg: Uint8Array): string {
 
 /** Host already sends bare base64 — wrap once, no double-prefix. */
 export function frameDataToUri(data: string): string {
-  if (data.charCodeAt(0) === 100 && data.startsWith('data:')) return data; // 'd' of data:
+  if (data.length > 5 && data.charCodeAt(0) === 100 && data.startsWith('data:')) return data;
   return DATA_URI_PREFIX + data;
 }

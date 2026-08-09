@@ -17,13 +17,12 @@ import {
   clampZoom,
   isDoubleTap,
   isTap,
-  normFromPoint,
-  panOffsetForZoom,
+  panToFollowCursor,
   resolveFingerMode,
   scrollStepsFromDelta,
   shouldStartCursorMove,
   trackpadDelta,
-  zoomFromFrameRatio,
+  zoomFromPinchStart,
 } from '../services/gestures';
 
 type Props = {
@@ -42,9 +41,8 @@ type Props = {
  *  • Light tap     → left-click WHERE THE CURSOR ALREADY IS (no jump)
  *  • 1-finger drag → move the mouse (trackpad)
  *  • Long-press    → right-click at cursor (no jump)
- *  • Pinch         → sticky zoom to see better
- *  • 2-finger drag while zoomed → pan the view
- *  • 2-finger drag at fit       → remote scroll
+ *  • Pinch         → sticky zoom; view stays locked on the mouse
+ *  • 2-finger drag → mouse-wheel scroll (any zoom level)
  */
 function RemoteCanvasImpl({
   uri,
@@ -62,13 +60,17 @@ function RemoteCanvasImpl({
   const multiTouch = useRef(false);
   /** Local zoom authority during pinch — parent lags by a frame. */
   const stickyZoom = useRef(zoom);
-  const lastPinchDist = useRef(0);
+  const pinchStartZoom = useRef(1);
+  const pinchStartDist = useRef(0);
   const pinchLocked = useRef(false);
   const twoFingerMid = useRef<{ x: number; y: number } | null>(null);
   const twoFingerOrigin = useRef<{ x: number; y: number } | null>(null);
   const panOffset = useRef({ x: 0, y: 0 });
   const panOrigin = useRef({ x: 0, y: 0 });
   const animPan = useRef(new Animated.ValueXY({ x: 0, y: 0 })).current;
+  /** Animated scale — smooth pinch without React re-render every frame */
+  const animZoom = useRef(new Animated.Value(zoom)).current;
+  const zoomSyncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const touchStart = useRef({ x: 0, y: 0, t: 0, lx: 0, ly: 0 });
   const lastFinger = useRef({ lx: 0, ly: 0 });
@@ -80,25 +82,35 @@ function RemoteCanvasImpl({
   const [hint, setHint] = useState(!!showGestureHint);
   const [badge, setBadge] = useState<string | null>(null);
 
-  useEffect(() => {
-    stickyZoom.current = zoom;
-  }, [zoom]);
+  /** Keep zoomed view locked on the remote cursor (center of phone screen). */
+  const followCursor = useCallback(() => {
+    const z = stickyZoom.current;
+    const pan = panToFollowCursor(cursor.current, content.current, layout.current, z);
+    panOffset.current = pan;
+    animPan.setValue(pan);
+  }, [animPan]);
 
-  // Clear pan only when user fully fits (zoom ≈ 1)
+  // Sync parent zoom → local only when not mid-gesture (avoids snap glitches)
   useEffect(() => {
-    if (zoom <= VIEW_PAN_MIN_ZOOM) {
-      if (panOffset.current.x !== 0 || panOffset.current.y !== 0) {
-        panOffset.current = { x: 0, y: 0 };
-        animPan.setValue({ x: 0, y: 0 });
-      }
-    }
-  }, [zoom, animPan]);
+    if (multiTouch.current || pinchLocked.current) return;
+    stickyZoom.current = zoom;
+    animZoom.setValue(zoom);
+    // Always re-center on cursor when zoom buttons / external zoom change
+    followCursor();
+  }, [zoom, animZoom, followCursor]);
 
   useEffect(() => {
     if (!showGestureHint) return;
     const t = setTimeout(() => setHint(false), 6000);
     return () => clearTimeout(t);
   }, [showGestureHint]);
+
+  useEffect(
+    () => () => {
+      if (zoomSyncTimer.current) clearTimeout(zoomSyncTimer.current);
+    },
+    [],
+  );
 
   const aspect = screenW > 0 && screenH > 0 ? screenW / screenH : 16 / 9;
 
@@ -124,6 +136,10 @@ function RemoteCanvasImpl({
       h: e.nativeEvent.layout.height,
     };
     recomputeContent();
+    // Re-lock zoom framing after rotation / chrome resize
+    if (stickyZoom.current > VIEW_PAN_MIN_ZOOM) {
+      followCursor();
+    }
   };
 
   const clearLong = () => {
@@ -150,13 +166,30 @@ function RemoteCanvasImpl({
     };
   };
 
+  /** Apply zoom locally (animated) and debounce parent state. */
   const commitZoom = (z: number) => {
     const next = clampZoom(z);
     stickyZoom.current = next;
-    onZoomChange?.(next);
+    animZoom.setValue(next);
+    // Zoom keeps the mouse in the middle of the phone screen
+    followCursor();
+    if (zoomSyncTimer.current) clearTimeout(zoomSyncTimer.current);
+    zoomSyncTimer.current = setTimeout(() => {
+      zoomSyncTimer.current = null;
+      onZoomChange?.(stickyZoom.current);
+    }, 48);
   };
 
-  /** 1-finger drag → mouse move only */
+  const flushZoomToParent = () => {
+    if (zoomSyncTimer.current) {
+      clearTimeout(zoomSyncTimer.current);
+      zoomSyncTimer.current = null;
+    }
+    followCursor();
+    onZoomChange?.(stickyZoom.current);
+  };
+
+  /** 1-finger drag → mouse move; view follows cursor when zoomed */
   const driveCursor = (locationX: number, locationY: number) => {
     const dxPx = locationX - lastFinger.current.lx;
     const dyPx = locationY - lastFinger.current.ly;
@@ -171,13 +204,18 @@ function RemoteCanvasImpl({
     );
     cursor.current = applyTrackpadMove(cursor.current, dx, dy);
     client?.sendPointer('move', cursor.current.x, cursor.current.y);
+    if (stickyZoom.current > VIEW_PAN_MIN_ZOOM) {
+      followCursor();
+    }
   };
 
   const beginMulti = (e: GestureResponderEvent) => {
     multiTouch.current = true;
     clearLong();
     pinchLocked.current = false;
-    lastPinchDist.current = touchDist(e) || 1;
+    const d = touchDist(e) || 1;
+    pinchStartDist.current = d;
+    pinchStartZoom.current = stickyZoom.current;
     const mid = midPoint(e);
     twoFingerMid.current = mid;
     twoFingerOrigin.current = mid;
@@ -229,16 +267,19 @@ function RemoteCanvasImpl({
         onPanResponderMove: (e: GestureResponderEvent) => {
           const touches = e.nativeEvent.touches;
 
-          // ── TWO FINGERS: pinch zoom (sticky) + pan view / scroll ──
+          // ── TWO FINGERS: pinch zoom OR mouse-wheel scroll ──
           if (touches.length >= 2) {
             if (!multiTouch.current) beginMulti(e);
 
             const d = touchDist(e);
-            const prev = lastPinchDist.current > 0 ? lastPinchDist.current : d || 1;
-            const frameRatio = d > 0 ? d / prev : 1;
+            const base = pinchStartDist.current > 0 ? pinchStartDist.current : d || 1;
+            const frameRatio = d > 0 ? d / base : 1;
 
-            if (!pinchLocked.current && Math.abs(frameRatio - 1) > 0.02) {
+            if (!pinchLocked.current && Math.abs(frameRatio - 1) > 0.035) {
               pinchLocked.current = true;
+              // Re-anchor at lock moment so first pinch step isn't a jump
+              pinchStartDist.current = d || base;
+              pinchStartZoom.current = stickyZoom.current;
             }
 
             const mode = resolveFingerMode(
@@ -249,24 +290,16 @@ function RemoteCanvasImpl({
             );
 
             if (mode === 'pinch' && d > 0) {
-              // Incremental: release cannot snap zoom back to 1
-              commitZoom(zoomFromFrameRatio(stickyZoom.current, frameRatio));
+              // Stable absolute pinch from gesture start — no cumulative glitches
+              commitZoom(
+                zoomFromPinchStart(pinchStartZoom.current, pinchStartDist.current, d),
+              );
               setBadge(`${Math.round(stickyZoom.current * 100)}%`);
-              lastPinchDist.current = d;
-            } else if (d > 0) {
-              lastPinchDist.current = d;
+              return;
             }
 
-            // While zoomed: 2-finger drag pans the VIEW (see other parts of desktop)
-            if (stickyZoom.current > VIEW_PAN_MIN_ZOOM && twoFingerOrigin.current) {
-              const mid = midPoint(e);
-              panOffset.current = {
-                x: panOrigin.current.x + (mid.x - twoFingerOrigin.current.x),
-                y: panOrigin.current.y + (mid.y - twoFingerOrigin.current.y),
-              };
-              animPan.setValue(panOffset.current);
-              if (mode !== 'pinch') setBadge('Look around');
-            } else if (mode === 'scroll' && twoFingerMid.current) {
+            // 2-finger drag = mouse wheel (works at any zoom, including zoomed-in)
+            if (mode === 'scroll' && twoFingerMid.current) {
               const mid = midPoint(e);
               const dy = twoFingerMid.current.y - mid.y;
               const steps = scrollStepsFromDelta(dy);
@@ -275,6 +308,7 @@ function RemoteCanvasImpl({
                   dy: steps,
                 });
                 twoFingerMid.current = mid;
+                setBadge(steps > 0 ? 'Scroll ↑' : 'Scroll ↓');
               }
             }
             return;
@@ -286,8 +320,8 @@ function RemoteCanvasImpl({
             pinchLocked.current = false;
             twoFingerMid.current = null;
             twoFingerOrigin.current = null;
-            lastPinchDist.current = 0;
-            onZoomChange?.(stickyZoom.current);
+            pinchStartDist.current = 0;
+            flushZoomToParent();
             setBadge(null);
             return;
           }
@@ -317,20 +351,15 @@ function RemoteCanvasImpl({
             pinchLocked.current = false;
             twoFingerMid.current = null;
             twoFingerOrigin.current = null;
-            lastPinchDist.current = 0;
-            // Keep zoom exactly where pinch left it
-            onZoomChange?.(stickyZoom.current);
-            if (stickyZoom.current <= VIEW_PAN_MIN_ZOOM) {
-              const cleared = panOffsetForZoom(1, panOffset.current);
-              panOffset.current = cleared;
-              animPan.setValue(cleared);
-            }
+            pinchStartDist.current = 0;
+            // Keep zoom exactly where pinch left it; view locked on mouse
+            flushZoomToParent();
             setBadge(null);
             cursorDriving.current = false;
             return;
           }
 
-          const { locationX, locationY, pageX, pageY } = e.nativeEvent;
+          const { pageX, pageY } = e.nativeEvent;
           const duration = Date.now() - touchStart.current.t;
           const dist = Math.hypot(pageX - touchStart.current.x, pageY - touchStart.current.y);
 
@@ -345,7 +374,7 @@ function RemoteCanvasImpl({
           const wantClick =
             !longFired.current &&
             isTap(dist, duration) &&
-            (!cursorDriving.current || dist < 36 || duration < 280);
+            (!cursorDriving.current || dist < 28 || duration < 280);
 
           if (wantClick) {
             const c = cursor.current;
@@ -376,11 +405,13 @@ function RemoteCanvasImpl({
           twoFingerMid.current = null;
           twoFingerOrigin.current = null;
           cursorDriving.current = false;
-          onZoomChange?.(stickyZoom.current);
+          flushZoomToParent();
           setBadge(null);
         },
       }),
-    [client, onZoomChange, animPan],
+    // client / callbacks — anim refs are stable
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [client, onZoomChange, animPan, animZoom, followCursor],
   );
 
   return (
@@ -389,10 +420,11 @@ function RemoteCanvasImpl({
         style={[
           styles.stage,
           {
+            // Scale around view center first, then pan so the mouse stays centered
             transform: [
+              { scale: animZoom },
               { translateX: animPan.x },
               { translateY: animPan.y },
-              { scale: zoom },
             ],
           },
         ]}
@@ -416,8 +448,8 @@ function RemoteCanvasImpl({
           <Text style={styles.hintLine}>Drag · move the mouse</Text>
           <Text style={styles.hintLine}>Tap · left-click (at the mouse, no jump)</Text>
           <Text style={styles.hintLine}>Long-press · right-click at mouse</Text>
-          <Text style={styles.hintLine}>Pinch · zoom to see better (stays)</Text>
-          <Text style={styles.hintLine}>2 fingers · pan when zoomed</Text>
+          <Text style={styles.hintLine}>Pinch · zoom (stays on the mouse)</Text>
+          <Text style={styles.hintLine}>2 fingers · scroll wheel up/down</Text>
         </View>
       ) : null}
 

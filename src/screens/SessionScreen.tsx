@@ -236,6 +236,17 @@ export function SessionScreen({
               <ToolBtn label="+" title="Zoom in" onPress={zoomIn} />
               <ToolBtn label="⊡" title="Fit screen" onPress={zoomFit} />
               <View style={styles.toolbarSep} />
+              <ToolBtn
+                label="↑"
+                title="Scroll up (mouse wheel)"
+                onPress={() => client.sendPointer('scroll', -1, -1, { dy: 3 })}
+              />
+              <ToolBtn
+                label="↓"
+                title="Scroll down (mouse wheel)"
+                onPress={() => client.sendPointer('scroll', -1, -1, { dy: -3 })}
+              />
+              <View style={styles.toolbarSep} />
               <ToolBtn label="Hide" title="Hide controls" onPress={() => setBarOpen(false)} />
               <ToolBtn label="✕" title="Disconnect" danger onPress={onDisconnect} />
             </View>
