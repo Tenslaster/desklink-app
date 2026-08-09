@@ -64,7 +64,7 @@ console.log('\n=== DeskLink gesture policy tests ===\n');
 // Trackpad: drag = mouse move; tap = click
 assert(g.clickMovesCursor() === false, 'tap does not continuously move cursor');
 assert(g.shouldStartCursorMove(5) === false, 'small travel → still a tap');
-assert(g.shouldStartCursorMove(25) === true, 'past slop → mouse drag');
+assert(g.shouldStartCursorMove(40) === true, 'past slop → mouse drag');
 const cur0 = { x: 0.5, y: 0.5 };
 const dlt = g.trackpadDelta(100, 0, 400, 300, 1);
 const cur1 = g.applyTrackpadMove(cur0, dlt.dx, dlt.dy);
