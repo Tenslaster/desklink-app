@@ -61,33 +61,39 @@ function assert(cond, name) {
 
 console.log('\n=== DeskLink gesture policy tests ===\n');
 
-// Enterprise trackpad rules
-assert(g.clickMovesCursor() === false, 'click/tap never moves cursor');
-assert(g.shouldStartCursorMove(5) === false, 'small finger travel → no cursor move');
-assert(g.shouldStartCursorMove(20) === true, 'past slop → cursor may move');
+// Trackpad: drag = mouse move; tap = click
+assert(g.clickMovesCursor() === false, 'tap does not continuously move cursor');
+assert(g.shouldStartCursorMove(5) === false, 'small travel → still a tap');
+assert(g.shouldStartCursorMove(25) === true, 'past slop → mouse drag');
 const cur0 = { x: 0.5, y: 0.5 };
 const dlt = g.trackpadDelta(100, 0, 400, 300, 1);
 const cur1 = g.applyTrackpadMove(cur0, dlt.dx, dlt.dy);
-assert(cur1.x > 0.5 && cur1.y === 0.5, 'trackpad drag right increases x only');
-assert(g.isTap(5, 120) === true, 'tap does not count as drag');
-assert(g.isTap(40, 120) === false, 'drag past slop is not a tap');
+assert(cur1.x > 0.5 && cur1.y === 0.5, 'drag right moves mouse x');
+assert(g.isTap(8, 120) === true, 'light press = tap/click');
+assert(g.isTap(40, 120) === false, 'big travel = not tap');
 
-// 1 finger never pans
-assert(g.oneFingerPansView() === false, 'oneFingerPansView() is always false');
-assert(g.resolveFingerMode(1, 1, 1) === 'mouse', '1 finger @ fit → mouse');
-assert(g.resolveFingerMode(1, 2.5, 1) === 'mouse', '1 finger @ zoomed → mouse (NOT view_pan)');
-assert(g.resolveFingerMode(1, 3, 1.5) === 'mouse', '1 finger ignores pinch ratio → mouse');
+// 1 finger = mouse, never local pan
+assert(g.oneFingerPansView(1) === false, '1 finger never pans view');
+assert(g.oneFingerPansView(2) === false, '1 finger still mouse when zoomed');
+assert(g.resolveFingerMode(1, 1, 1, false) === 'mouse', '1 finger → mouse');
+assert(g.resolveFingerMode(1, 2.5, 1, false) === 'mouse', '1 finger zoomed → mouse');
 
 // 2 fingers
-assert(g.resolveFingerMode(2, 1, 1) === 'scroll', '2 fingers @ fit → scroll');
-assert(g.resolveFingerMode(2, 2, 1) === 'view_pan', '2 fingers @ zoomed → view_pan');
-assert(g.resolveFingerMode(2, 2, 1.2) === 'pinch', '2 fingers large pinch → pinch');
-assert(g.resolveFingerMode(2, 1, 0.85) === 'pinch', '2 fingers pinch-out → pinch');
+assert(g.resolveFingerMode(2, 1, 1, false) === 'scroll', '2f fit → scroll');
+assert(g.resolveFingerMode(2, 2, 1, false) === 'view_pan', '2f zoomed → view pan');
+assert(g.resolveFingerMode(2, 2, 1.05, false) === 'pinch', '2f scale change → pinch');
+assert(g.resolveFingerMode(2, 1, 1, true) === 'pinch', 'pinch stays locked');
 
-// Zoom helpers
+// Sticky incremental zoom (no snap-back to start)
+let z = 1;
+z = g.zoomFromFrameRatio(z, 1.2);
+z = g.zoomFromFrameRatio(z, 1.2);
+assert(z > 1.4, 'incremental pinch grows zoom');
+// fingers collapse on release used to reset; frame ratio 1 must not wipe zoom
+const held = g.zoomFromFrameRatio(z, 1.0);
+assert(held === z, 'ratio 1 keeps zoom (no snap-back)');
 assert(g.clampZoom(0.5) === 1, 'clampZoom floor 1');
 assert(g.clampZoom(9) === 4, 'clampZoom ceil 4');
-assert(g.zoomFromPinch(1, 2) === 2, 'zoomFromPinch 1*2');
 
 // Pan reset at fit
 assert(

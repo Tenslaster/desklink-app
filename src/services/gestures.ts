@@ -1,41 +1,37 @@
 /**
- * Pure gesture policy for DeskLink remote canvas.
- * Enterprise trackpad-style pointer (tested, no React deps).
+ * DeskLink touch policy (pure, unit-tested).
  *
  * 1 finger:
- *   - Tap        → click at CURRENT cursor (never moves cursor first)
- *   - Drag       → move cursor (relative trackpad) only after slop
- *   - Long-press → right-click / button-down at CURRENT cursor (no warp)
+ *   - Light tap   → left-click under finger
+ *   - Drag        → mouse move (trackpad) after slop
+ *   - Long-press  → right-click under finger
  * 2 fingers:
- *   - zoomed → pan local view
- *   - fit    → remote scroll
- *   - pinch  → zoom
+ *   - Pinch       → sticky zoom (incremental, no snap-back on release)
+ *   - Drag zoomed → pan the local view (look around after zoom)
+ *   - Drag at fit → remote scroll
  */
 
-export const MOVE_SLOP_PX = 14;
-export const LONG_PRESS_MS = 450;
-export const DOUBLE_TAP_MS = 280;
-export const DOUBLE_TAP_SLOP_PX = 28;
-export const PINCH_ZOOM_THRESHOLD = 0.08;
+export const MOVE_SLOP_PX = 18;
+export const TAP_SLOP_PX = 30;
+export const TAP_MAX_MS = 500;
+export const LONG_PRESS_MS = 480;
+export const DOUBLE_TAP_MS = 300;
+export const DOUBLE_TAP_SLOP_PX = 36;
+export const PINCH_FRAME_EPS = 0.02;
 export const SCROLL_STEP_PX = 24;
 export const VIEW_PAN_MIN_ZOOM = 1.05;
-/** Trackpad sensitivity: 1 = finger pixel ≈ desktop pixel at fit zoom */
 export const TRACKPAD_SENSITIVITY = 1.15;
 
-export type FingerMode =
-  | 'mouse'
-  | 'view_pan'
-  | 'scroll'
-  | 'pinch';
+export type FingerMode = 'mouse' | 'view_pan' | 'scroll' | 'pinch';
 
-/** Decide primary mode from touch count + zoom + pinch ratio. */
 export function resolveFingerMode(
   touchCount: number,
   zoom: number,
-  pinchRatio: number,
+  frameRatio: number,
+  pinchLocked: boolean,
 ): FingerMode {
   if (touchCount >= 2) {
-    if (Math.abs(pinchRatio - 1) > PINCH_ZOOM_THRESHOLD) {
+    if (pinchLocked || Math.abs(frameRatio - 1) > PINCH_FRAME_EPS) {
       return 'pinch';
     }
     if (zoom > VIEW_PAN_MIN_ZOOM) {
@@ -46,24 +42,27 @@ export function resolveFingerMode(
   return 'mouse';
 }
 
-export function oneFingerPansView(): boolean {
+/** Frame-to-frame pinch — never recomputes from gesture start (no snap-back). */
+export function zoomFromFrameRatio(currentZoom: number, frameRatio: number): number {
+  if (!Number.isFinite(frameRatio) || frameRatio <= 0) return clampZoom(currentZoom);
+  return clampZoom(currentZoom * frameRatio);
+}
+
+export function oneFingerPansView(zoom: number): boolean {
+  // When zoomed, 1-finger drag is still mouse move (user clarified).
+  // View pan is 2-finger only while zoomed.
+  void zoom;
   return false;
 }
 
-/** Enterprise rule: a tap/click must never relocate the cursor. */
 export function clickMovesCursor(): boolean {
   return false;
 }
 
-/** Cursor moves only after the finger travels past slop (a real drag). */
 export function shouldStartCursorMove(movedPx: number): boolean {
   return movedPx > MOVE_SLOP_PX;
 }
 
-/**
- * Relative trackpad step: finger delta in view px → normalized desktop delta.
- * contentW/H = letterboxed desktop rect on the phone; zoom scales sensitivity.
- */
 export function trackpadDelta(
   dxPx: number,
   dyPx: number,
@@ -93,11 +92,11 @@ export function applyTrackpadMove(
 }
 
 export function clampZoom(z: number): number {
-  return Math.max(1, Math.min(4, z));
+  return Math.max(1, Math.min(4, Math.round(z * 100) / 100));
 }
 
 export function zoomFromPinch(startZoom: number, ratio: number): number {
-  return clampZoom(Math.round(startZoom * ratio * 20) / 20);
+  return clampZoom(startZoom * ratio);
 }
 
 export function scrollStepsFromDelta(dyPx: number): number {
@@ -105,8 +104,9 @@ export function scrollStepsFromDelta(dyPx: number): number {
   return Math.max(-4, Math.min(4, Math.round(dyPx / SCROLL_STEP_PX)));
 }
 
+/** Light press on phone → left click (forgiving jitter). */
 export function isTap(movedPx: number, durationMs: number): boolean {
-  return movedPx <= MOVE_SLOP_PX && durationMs < LONG_PRESS_MS + 80;
+  return movedPx <= TAP_SLOP_PX && durationMs > 0 && durationMs <= TAP_MAX_MS;
 }
 
 export function isDoubleTap(dtMs: number, distPx: number, prevExists: boolean): boolean {

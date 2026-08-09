@@ -14,6 +14,7 @@ import {
   LONG_PRESS_MS,
   VIEW_PAN_MIN_ZOOM,
   applyTrackpadMove,
+  clampZoom,
   isDoubleTap,
   isTap,
   normFromPoint,
@@ -22,7 +23,7 @@ import {
   scrollStepsFromDelta,
   shouldStartCursorMove,
   trackpadDelta,
-  zoomFromPinch,
+  zoomFromFrameRatio,
 } from '../services/gestures';
 
 type Props = {
@@ -37,12 +38,13 @@ type Props = {
 };
 
 /**
- * Enterprise remote-desktop pointer:
- *  • Tap        → one-shot click UNDER THE FINGER (place + click, not a drag)
- *  • Drag slop  → relative trackpad move (cursor follows only while dragging)
- *  • Long-press → right-click under finger
- *  • 2 fingers  → pan / scroll / pinch
- *  • Touch-down alone never streams move (no accidental warps)
+ * UX (user-confirmed):
+ *  • Light tap     → left-click under finger
+ *  • 1-finger drag → mouse move (trackpad)
+ *  • Pinch         → zoom to see better; STAYS zoomed (no snap-back)
+ *  • 2-finger drag while zoomed → pan the view to look around
+ *  • 2-finger drag at fit       → remote scroll
+ *  • Long-press    → right-click under finger
  */
 function RemoteCanvasImpl({
   uri,
@@ -56,24 +58,22 @@ function RemoteCanvasImpl({
 }: Props) {
   const layout = useRef({ w: 1, h: 1 });
   const content = useRef({ x: 0, y: 0, w: 1, h: 1 });
-  /** Authoritative remote cursor (0–1). Never warp on tap. */
   const cursor = useRef({ x: 0.5, y: 0.5 });
   const multiTouch = useRef(false);
-  const pinchStartDist = useRef(0);
-  const pinchStartZoom = useRef(1);
+  /** Local zoom authority during pinch — parent lags by a frame. */
+  const stickyZoom = useRef(zoom);
+  const lastPinchDist = useRef(0);
+  const pinchLocked = useRef(false);
   const twoFingerMid = useRef<{ x: number; y: number } | null>(null);
+  const twoFingerOrigin = useRef<{ x: number; y: number } | null>(null);
   const panOffset = useRef({ x: 0, y: 0 });
-  const twoFingerPanStart = useRef({ x: 0, y: 0 });
+  const panOrigin = useRef({ x: 0, y: 0 });
   const animPan = useRef(new Animated.ValueXY({ x: 0, y: 0 })).current;
-  const zoomRef = useRef(zoom);
-  zoomRef.current = zoom;
 
   const touchStart = useRef({ x: 0, y: 0, t: 0, lx: 0, ly: 0 });
   const lastFinger = useRef({ lx: 0, ly: 0 });
   const moved = useRef(false);
-  /** True once past slop — only then we stream move events */
   const cursorDriving = useRef(false);
-  const dragging = useRef(false); // left button held (long-press drag)
   const longTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longFired = useRef(false);
   const lastTap = useRef({ t: 0, x: 0, y: 0 });
@@ -81,16 +81,22 @@ function RemoteCanvasImpl({
   const [badge, setBadge] = useState<string | null>(null);
 
   useEffect(() => {
-    const next = panOffsetForZoom(zoom, panOffset.current);
-    if (next.x !== panOffset.current.x || next.y !== panOffset.current.y) {
-      panOffset.current = next;
-      animPan.setValue(next);
+    stickyZoom.current = zoom;
+  }, [zoom]);
+
+  // Clear pan only when user fully fits (zoom ≈ 1)
+  useEffect(() => {
+    if (zoom <= VIEW_PAN_MIN_ZOOM) {
+      if (panOffset.current.x !== 0 || panOffset.current.y !== 0) {
+        panOffset.current = { x: 0, y: 0 };
+        animPan.setValue({ x: 0, y: 0 });
+      }
     }
   }, [zoom, animPan]);
 
   useEffect(() => {
     if (!showGestureHint) return;
-    const t = setTimeout(() => setHint(false), 5500);
+    const t = setTimeout(() => setHint(false), 6000);
     return () => clearTimeout(t);
   }, [showGestureHint]);
 
@@ -144,31 +150,38 @@ function RemoteCanvasImpl({
     };
   };
 
-  const endLeftDrag = () => {
-    if (dragging.current) {
-      const c = cursor.current;
-      client?.sendPointer('up', c.x, c.y, { button: 'left' });
-      dragging.current = false;
-      setBadge(null);
-    }
+  const commitZoom = (z: number) => {
+    const next = clampZoom(z);
+    stickyZoom.current = next;
+    onZoomChange?.(next);
   };
 
-  /** Relative trackpad move — only called after slop. */
+  /** 1-finger drag → mouse move only */
   const driveCursor = (locationX: number, locationY: number) => {
     const dxPx = locationX - lastFinger.current.lx;
     const dyPx = locationY - lastFinger.current.ly;
     lastFinger.current = { lx: locationX, ly: locationY };
     if (dxPx === 0 && dyPx === 0) return;
-
     const { dx, dy } = trackpadDelta(
       dxPx,
       dyPx,
       content.current.w,
       content.current.h,
-      zoomRef.current,
+      stickyZoom.current,
     );
     cursor.current = applyTrackpadMove(cursor.current, dx, dy);
     client?.sendPointer('move', cursor.current.x, cursor.current.y);
+  };
+
+  const beginMulti = (e: GestureResponderEvent) => {
+    multiTouch.current = true;
+    clearLong();
+    pinchLocked.current = false;
+    lastPinchDist.current = touchDist(e) || 1;
+    const mid = midPoint(e);
+    twoFingerMid.current = mid;
+    twoFingerOrigin.current = mid;
+    panOrigin.current = { ...panOffset.current };
   };
 
   const pan = useMemo(
@@ -186,18 +199,12 @@ function RemoteCanvasImpl({
           cursorDriving.current = false;
 
           if (touches.length >= 2) {
-            multiTouch.current = true;
-            endLeftDrag();
-            pinchStartDist.current = touchDist(e) || 1;
-            pinchStartZoom.current = zoomRef.current;
-            twoFingerMid.current = midPoint(e);
-            twoFingerPanStart.current = { ...panOffset.current };
-            setBadge(zoomRef.current > VIEW_PAN_MIN_ZOOM ? 'Pan view' : 'Scroll');
+            beginMulti(e);
             return;
           }
 
-          // ── ONE FINGER: do NOT move cursor on touch-down ──
           multiTouch.current = false;
+          pinchLocked.current = false;
           const { locationX, locationY, pageX, pageY } = e.nativeEvent;
           touchStart.current = {
             x: pageX,
@@ -207,64 +214,65 @@ function RemoteCanvasImpl({
             ly: locationY,
           };
           lastFinger.current = { lx: locationX, ly: locationY };
-          // No move on touch-down — wait for tap release or drag past slop
 
           longTimer.current = setTimeout(() => {
             if (moved.current || multiTouch.current || cursorDriving.current) return;
             longFired.current = true;
-            // Long-press = right-click under finger (absolute place + right click)
             const n = normFromPoint(
-              locationX,
-              locationY,
+              touchStart.current.lx,
+              touchStart.current.ly,
               content.current,
-              zoomRef.current,
+              stickyZoom.current,
               panOffset.current,
             );
             cursor.current = n;
             client?.sendPointer('click', n.x, n.y, { button: 'right' });
             setBadge('Right-click');
-            setTimeout(() => setBadge(null), 400);
+            setTimeout(() => setBadge(null), 350);
           }, LONG_PRESS_MS);
         },
 
         onPanResponderMove: (e: GestureResponderEvent) => {
           const touches = e.nativeEvent.touches;
 
+          // ── TWO FINGERS: pinch zoom (sticky) + pan view / scroll ──
           if (touches.length >= 2) {
-            if (!multiTouch.current) {
-              multiTouch.current = true;
-              clearLong();
-              endLeftDrag();
-              pinchStartDist.current = touchDist(e) || 1;
-              pinchStartZoom.current = zoomRef.current;
-              twoFingerMid.current = midPoint(e);
-              twoFingerPanStart.current = { ...panOffset.current };
-            }
+            if (!multiTouch.current) beginMulti(e);
 
             const d = touchDist(e);
-            const ratio = pinchStartDist.current > 0 ? d / pinchStartDist.current : 1;
-            const mode = resolveFingerMode(touches.length, zoomRef.current, ratio);
+            const prev = lastPinchDist.current > 0 ? lastPinchDist.current : d || 1;
+            const frameRatio = d > 0 ? d / prev : 1;
 
-            if (mode === 'pinch') {
-              const next = zoomFromPinch(pinchStartZoom.current, ratio);
-              onZoomChange?.(next);
-              setBadge(`${Math.round(next * 100)}%`);
+            if (!pinchLocked.current && Math.abs(frameRatio - 1) > 0.02) {
+              pinchLocked.current = true;
             }
 
-            if (mode === 'view_pan' || (zoomRef.current > VIEW_PAN_MIN_ZOOM && mode !== 'pinch')) {
+            const mode = resolveFingerMode(
+              2,
+              stickyZoom.current,
+              frameRatio,
+              pinchLocked.current,
+            );
+
+            if (mode === 'pinch' && d > 0) {
+              // Incremental: release cannot snap zoom back to 1
+              commitZoom(zoomFromFrameRatio(stickyZoom.current, frameRatio));
+              setBadge(`${Math.round(stickyZoom.current * 100)}%`);
+              lastPinchDist.current = d;
+            } else if (d > 0) {
+              lastPinchDist.current = d;
+            }
+
+            // While zoomed: 2-finger drag pans the VIEW (see other parts of desktop)
+            if (stickyZoom.current > VIEW_PAN_MIN_ZOOM && twoFingerOrigin.current) {
               const mid = midPoint(e);
-              if (twoFingerMid.current) {
-                const dx = mid.x - twoFingerMid.current.x;
-                const dy = mid.y - twoFingerMid.current.y;
-                panOffset.current = {
-                  x: twoFingerPanStart.current.x + dx,
-                  y: twoFingerPanStart.current.y + dy,
-                };
-                animPan.setValue(panOffset.current);
-              }
-            }
-
-            if (mode === 'scroll' && twoFingerMid.current) {
+              panOffset.current = {
+                x: panOrigin.current.x + (mid.x - twoFingerOrigin.current.x),
+                y: panOrigin.current.y + (mid.y - twoFingerOrigin.current.y),
+              };
+              animPan.setValue(panOffset.current);
+              if (mode !== 'pinch') setBadge('Look around');
+            } else if (mode === 'scroll' && twoFingerMid.current) {
               const mid = midPoint(e);
               const dy = twoFingerMid.current.y - mid.y;
               const steps = scrollStepsFromDelta(dy);
@@ -278,26 +286,32 @@ function RemoteCanvasImpl({
             return;
           }
 
-          if (multiTouch.current) return;
+          // Dropped to 1 finger after multi — freeze zoom (do not collapse)
+          if (multiTouch.current) {
+            multiTouch.current = false;
+            pinchLocked.current = false;
+            twoFingerMid.current = null;
+            twoFingerOrigin.current = null;
+            lastPinchDist.current = 0;
+            onZoomChange?.(stickyZoom.current);
+            setBadge(null);
+            return;
+          }
 
+          // ── ONE FINGER: drag = mouse move ──
           const { locationX, locationY, pageX, pageY } = e.nativeEvent;
           const dist = Math.hypot(pageX - touchStart.current.x, pageY - touchStart.current.y);
 
-          // Until slop: ignore — this is still a potential tap/click (no move)
           if (!cursorDriving.current) {
-            if (!shouldStartCursorMove(dist)) {
-              return;
-            }
-            // Crossed slop → start trackpad driving
+            if (!shouldStartCursorMove(dist)) return;
             cursorDriving.current = true;
             moved.current = true;
             clearLong();
             lastFinger.current = { lx: locationX, ly: locationY };
-            if (!dragging.current) setBadge('Move');
-            return; // first frame past slop: arm only, no jump
+            setBadge('Move mouse');
+            return;
           }
 
-          // Past slop: relative trackpad move
           driveCursor(locationX, locationY);
         },
 
@@ -306,11 +320,18 @@ function RemoteCanvasImpl({
 
           if (multiTouch.current) {
             multiTouch.current = false;
+            pinchLocked.current = false;
             twoFingerMid.current = null;
+            twoFingerOrigin.current = null;
+            lastPinchDist.current = 0;
+            // Keep zoom exactly where pinch left it
+            onZoomChange?.(stickyZoom.current);
+            if (stickyZoom.current <= VIEW_PAN_MIN_ZOOM) {
+              const cleared = panOffsetForZoom(1, panOffset.current);
+              panOffset.current = cleared;
+              animPan.setValue(cleared);
+            }
             setBadge(null);
-            const next = panOffsetForZoom(zoomRef.current, panOffset.current);
-            panOffset.current = next;
-            animPan.setValue(next);
             cursorDriving.current = false;
             return;
           }
@@ -319,28 +340,19 @@ function RemoteCanvasImpl({
           const duration = Date.now() - touchStart.current.t;
           const dist = Math.hypot(pageX - touchStart.current.x, pageY - touchStart.current.y);
 
-          // Long-press already fired right-click
           if (longFired.current && !cursorDriving.current) {
             cursorDriving.current = false;
             setBadge(null);
             return;
           }
 
-          if (dragging.current) {
-            endLeftDrag();
-            cursorDriving.current = false;
-            setBadge(null);
-            return;
-          }
-
-          // Tap: ONE-SHOT click under the finger (place + click).
-          // Not a continuous "move" — no drag stream, no accidental selection.
-          if (isTap(dist, duration)) {
+          // Light press → left click under finger
+          if (!cursorDriving.current && isTap(dist, duration)) {
             const n = normFromPoint(
               locationX,
               locationY,
               content.current,
-              zoomRef.current,
+              stickyZoom.current,
               panOffset.current,
             );
             cursor.current = n;
@@ -349,16 +361,15 @@ function RemoteCanvasImpl({
             const tapDist = Math.hypot(pageX - lastTap.current.x, pageY - lastTap.current.y);
             if (isDoubleTap(dt, tapDist, lastTap.current.t > 0)) {
               client?.sendPointer('click', n.x, n.y, { button: 'left' });
-              client?.sendPointer('click', n.x, n.y, { button: 'left' });
+              setTimeout(() => client?.sendPointer('click', n.x, n.y, { button: 'left' }), 45);
               lastTap.current = { t: 0, x: 0, y: 0 };
               setBadge('Double-click');
-              setTimeout(() => setBadge(null), 400);
             } else {
               client?.sendPointer('click', n.x, n.y, { button: 'left' });
               lastTap.current = { t: now, x: pageX, y: pageY };
               setBadge('Click');
-              setTimeout(() => setBadge(null), 250);
             }
+            setTimeout(() => setBadge(null), 220);
           }
 
           cursorDriving.current = false;
@@ -367,10 +378,12 @@ function RemoteCanvasImpl({
 
         onPanResponderTerminate: () => {
           clearLong();
-          endLeftDrag();
           multiTouch.current = false;
+          pinchLocked.current = false;
           twoFingerMid.current = null;
+          twoFingerOrigin.current = null;
           cursorDriving.current = false;
+          onZoomChange?.(stickyZoom.current);
           setBadge(null);
         },
       }),
@@ -406,11 +419,12 @@ function RemoteCanvasImpl({
 
       {hint && uri ? (
         <View style={styles.hint} pointerEvents="none">
-          <Text style={styles.hintTitle}>Touch controls</Text>
-          <Text style={styles.hintLine}>Tap · click under your finger</Text>
-          <Text style={styles.hintLine}>Drag · move mouse (trackpad)</Text>
-          <Text style={styles.hintLine}>Long-press · right-click</Text>
-          <Text style={styles.hintLine}>2 fingers · pan / scroll / pinch</Text>
+          <Text style={styles.hintTitle}>How to use</Text>
+          <Text style={styles.hintLine}>Tap · left-click on the PC</Text>
+          <Text style={styles.hintLine}>Drag 1 finger · move mouse</Text>
+          <Text style={styles.hintLine}>Pinch · zoom in (stays zoomed)</Text>
+          <Text style={styles.hintLine}>2 fingers drag · look around when zoomed</Text>
+          <Text style={styles.hintLine}>Toolbar “Fit” · reset zoom</Text>
         </View>
       ) : null}
 
