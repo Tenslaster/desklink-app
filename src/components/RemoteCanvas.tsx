@@ -16,6 +16,7 @@ import {
   applyTrackpadMove,
   isDoubleTap,
   isTap,
+  normFromPoint,
   panOffsetForZoom,
   resolveFingerMode,
   scrollStepsFromDelta,
@@ -36,12 +37,12 @@ type Props = {
 };
 
 /**
- * Enterprise trackpad pointer:
- *  • Tap / click  → click at CURRENT cursor — does NOT move the mouse
- *  • Drag past slop → relative trackpad move
- *  • Long-press   → right-click or hold-drag at CURRENT cursor
- *  • 2 fingers    → pan view (zoomed) / scroll (fit) / pinch zoom
- *  • 1 finger never pans the local stage
+ * Enterprise remote-desktop pointer:
+ *  • Tap        → one-shot click UNDER THE FINGER (place + click, not a drag)
+ *  • Drag slop  → relative trackpad move (cursor follows only while dragging)
+ *  • Long-press → right-click under finger
+ *  • 2 fingers  → pan / scroll / pinch
+ *  • Touch-down alone never streams move (no accidental warps)
  */
 function RemoteCanvasImpl({
   uri,
@@ -206,17 +207,23 @@ function RemoteCanvasImpl({
             ly: locationY,
           };
           lastFinger.current = { lx: locationX, ly: locationY };
-          // Intentionally no sendPointer('move') here — enterprise rule
+          // No move on touch-down — wait for tap release or drag past slop
 
           longTimer.current = setTimeout(() => {
             if (moved.current || multiTouch.current || cursorDriving.current) return;
             longFired.current = true;
-            // Long-press at CURRENT cursor — no warp
-            dragging.current = true;
-            client?.sendPointer('down', cursor.current.x, cursor.current.y, {
-              button: 'left',
-            });
-            setBadge('Hold');
+            // Long-press = right-click under finger (absolute place + right click)
+            const n = normFromPoint(
+              locationX,
+              locationY,
+              content.current,
+              zoomRef.current,
+              panOffset.current,
+            );
+            cursor.current = n;
+            client?.sendPointer('click', n.x, n.y, { button: 'right' });
+            setBadge('Right-click');
+            setTimeout(() => setBadge(null), 400);
           }, LONG_PRESS_MS);
         },
 
@@ -308,42 +315,49 @@ function RemoteCanvasImpl({
             return;
           }
 
-          const { pageX, pageY } = e.nativeEvent;
+          const { locationX, locationY, pageX, pageY } = e.nativeEvent;
           const duration = Date.now() - touchStart.current.t;
           const dist = Math.hypot(pageX - touchStart.current.x, pageY - touchStart.current.y);
-          const c = cursor.current;
+
+          // Long-press already fired right-click
+          if (longFired.current && !cursorDriving.current) {
+            cursorDriving.current = false;
+            setBadge(null);
+            return;
+          }
 
           if (dragging.current) {
-            // Long-press release without drag → right-click at CURRENT cursor
-            if (!cursorDriving.current && longFired.current) {
-              client?.sendPointer('up', c.x, c.y, { button: 'left' });
-              dragging.current = false;
-              client?.sendPointer('click', c.x, c.y, { button: 'right' });
-              setBadge('Right-click');
-              setTimeout(() => setBadge(null), 450);
-              return;
-            }
             endLeftDrag();
             cursorDriving.current = false;
             setBadge(null);
             return;
           }
 
-          // Tap: click WHERE THE CURSOR ALREADY IS — never move first
+          // Tap: ONE-SHOT click under the finger (place + click).
+          // Not a continuous "move" — no drag stream, no accidental selection.
           if (isTap(dist, duration)) {
+            const n = normFromPoint(
+              locationX,
+              locationY,
+              content.current,
+              zoomRef.current,
+              panOffset.current,
+            );
+            cursor.current = n;
             const now = Date.now();
             const dt = now - lastTap.current.t;
             const tapDist = Math.hypot(pageX - lastTap.current.x, pageY - lastTap.current.y);
             if (isDoubleTap(dt, tapDist, lastTap.current.t > 0)) {
-              client?.sendPointer('click', c.x, c.y, { button: 'left' });
-              client?.sendPointer('click', c.x, c.y, { button: 'left' });
+              client?.sendPointer('click', n.x, n.y, { button: 'left' });
+              client?.sendPointer('click', n.x, n.y, { button: 'left' });
               lastTap.current = { t: 0, x: 0, y: 0 };
               setBadge('Double-click');
               setTimeout(() => setBadge(null), 400);
             } else {
-              client?.sendPointer('click', c.x, c.y, { button: 'left' });
+              client?.sendPointer('click', n.x, n.y, { button: 'left' });
               lastTap.current = { t: now, x: pageX, y: pageY };
-              // subtle feedback — no "Move"
+              setBadge('Click');
+              setTimeout(() => setBadge(null), 250);
             }
           }
 
@@ -392,11 +406,11 @@ function RemoteCanvasImpl({
 
       {hint && uri ? (
         <View style={styles.hint} pointerEvents="none">
-          <Text style={styles.hintTitle}>Trackpad controls</Text>
-          <Text style={styles.hintLine}>Tap · click (cursor stays put)</Text>
-          <Text style={styles.hintLine}>Drag · move mouse</Text>
+          <Text style={styles.hintTitle}>Touch controls</Text>
+          <Text style={styles.hintLine}>Tap · click under your finger</Text>
+          <Text style={styles.hintLine}>Drag · move mouse (trackpad)</Text>
           <Text style={styles.hintLine}>Long-press · right-click</Text>
-          <Text style={styles.hintLine}>2 fingers · pan view / scroll / pinch</Text>
+          <Text style={styles.hintLine}>2 fingers · pan / scroll / pinch</Text>
         </View>
       ) : null}
 
