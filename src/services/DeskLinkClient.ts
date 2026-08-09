@@ -21,6 +21,8 @@ export type ClientEvents = {
   onLatency: (ms: number) => void;
   onMessage: (msg: ServerMsg) => void;
   onFrameCount?: (n: number) => void;
+  /** Fired when connected but no frame arrived for too long */
+  onFrameTimeout?: (seconds: number) => void;
 };
 
 export class DeskLinkClient {
@@ -28,11 +30,17 @@ export class DeskLinkClient {
   private state: ConnectionState = 'idle';
   private token: string | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private frameWatchTimer: ReturnType<typeof setInterval> | null = null;
   private disposed = false;
-  private frameBusy = false;
+  /** Coalesce frames to one paint per animation frame */
   private pendingUri: string | null = null;
+  private pendingBytes = 0;
+  private rafScheduled = false;
   private frames = 0;
   private password = '';
+  private connectedAt = 0;
+  private lastFrameAt = 0;
+  private authSent = false;
 
   constructor(private readonly events: ClientEvents) {}
 
@@ -44,12 +52,24 @@ export class DeskLinkClient {
     return this.frames;
   }
 
+  get msSinceLastFrame(): number {
+    if (!this.lastFrameAt) return this.connectedAt ? Date.now() - this.connectedAt : 0;
+    return Date.now() - this.lastFrameAt;
+  }
+
   connect(host: string, port: number, password: string): void {
     this.disconnect();
     this.disposed = false;
     this.frames = 0;
     this.password = password;
-    const url = `ws://${host.trim()}:${port}`;
+    this.authSent = false;
+    this.lastFrameAt = 0;
+    this.connectedAt = 0;
+    this.pendingUri = null;
+    this.rafScheduled = false;
+
+    const cleanHost = host.trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
+    const url = `ws://${cleanHost}:${port}`;
     this.setState('connecting', url);
 
     let ws: WebSocket;
@@ -69,9 +89,9 @@ export class DeskLinkClient {
     ws.onopen = () => {
       if (this.disposed) return;
       this.setState('authenticating');
-      // Prefer JSON base64 frames (reliable on React Native)
-      this.send({ type: 'prefer', format: 'json', binary: false });
-      this.send({ type: 'auth', password: this.password });
+      // JSON frames only — binary DLK1 is unreliable on React Native WebSocket
+      this.sendPreferJson();
+      this.sendAuthOnce();
     };
 
     ws.onmessage = (ev) => {
@@ -84,18 +104,29 @@ export class DeskLinkClient {
       this.setState('error', 'Connection error — check IP, port, Wi‑Fi, and firewall');
     };
 
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       this.stopPing();
+      this.stopFrameWatch();
       if (this.disposed) return;
       if (this.state !== 'error') {
-        this.setState('closed', 'Disconnected');
+        const reason = ev.reason || (ev.code ? `code ${ev.code}` : 'Disconnected');
+        this.setState('closed', reason);
       }
       this.ws = null;
     };
   }
 
+  private sendPreferJson(): void {
+    this.send({ type: 'prefer', format: 'json', binary: false });
+  }
+
+  private sendAuthOnce(): void {
+    if (this.authSent) return;
+    this.authSent = true;
+    this.send({ type: 'auth', password: this.password });
+  }
+
   private async onMessage(data: unknown): Promise<void> {
-    // Text / JSON control + frame messages
     if (typeof data === 'string') {
       const msg = decodeMsg(data);
       if (!msg) return;
@@ -103,7 +134,6 @@ export class DeskLinkClient {
       return;
     }
 
-    // Binary DLK1 or raw JPEG
     try {
       let ab: ArrayBuffer | null = null;
       if (data instanceof ArrayBuffer) {
@@ -129,9 +159,14 @@ export class DeskLinkClient {
     if (msg.type === 'hello') {
       const h = msg as { screen?: { width: number; height: number } };
       if (h.screen) this.events.onScreen(h.screen.width, h.screen.height);
+      // Host sends hello first; auth if we haven't yet (or reconnect path)
       if (this.state === 'authenticating' || this.state === 'connecting') {
-        this.send({ type: 'prefer', format: 'json', binary: false });
-        this.send({ type: 'auth', password: this.password });
+        this.sendPreferJson();
+        // Allow re-auth on hello if previous auth was before hello arrived without response
+        if (!this.token) {
+          this.authSent = false;
+          this.sendAuthOnce();
+        }
       }
       return;
     }
@@ -140,17 +175,23 @@ export class DeskLinkClient {
       const m = msg as { token?: string; screen?: { width: number; height: number } };
       this.token = m.token || null;
       if (m.screen) this.events.onScreen(m.screen.width, m.screen.height);
+      this.connectedAt = Date.now();
+      this.lastFrameAt = 0;
       this.setState('streaming');
       this.startPing();
-      // Re-assert JSON frames after auth (stream starts on host after auth_ok)
-      this.send({ type: 'prefer', format: 'json', binary: false });
+      this.startFrameWatch();
+      // Ensure JSON path + ask host for an immediate keyframe
+      this.sendPreferJson();
+      this.send({ type: 'keyframe' });
       return;
     }
 
     if (msg.type === 'frame') {
       const data = (msg as { data?: string }).data;
       if (typeof data === 'string' && data.length > 0) {
-        this.emitUri(`data:image/jpeg;base64,${data}`, data.length);
+        // Avoid double "data:image..." prefix if host ever sends full URI
+        const uri = data.startsWith('data:') ? data : `data:image/jpeg;base64,${data}`;
+        this.emitUri(uri, data.length);
       }
       return;
     }
@@ -187,22 +228,28 @@ export class DeskLinkClient {
 
   private emitUri(uri: string, bytes: number): void {
     this.frames += 1;
+    this.lastFrameAt = Date.now();
     this.events.onFrameCount?.(this.frames);
-    if (this.frameBusy) {
-      this.pendingUri = uri;
-      return;
+    // Keep latest frame only — drop intermediate ones under load
+    this.pendingUri = uri;
+    this.pendingBytes = bytes;
+    if (this.rafScheduled) return;
+    this.rafScheduled = true;
+    const flush = () => {
+      this.rafScheduled = false;
+      if (this.disposed || !this.pendingUri) return;
+      const next = this.pendingUri;
+      const b = this.pendingBytes;
+      this.pendingUri = null;
+      this.pendingBytes = 0;
+      this.events.onFrame(next, b);
+    };
+    // requestAnimationFrame is not always available in RN; setTimeout(0) is fine
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(flush);
+    } else {
+      setTimeout(flush, 0);
     }
-    this.frameBusy = true;
-    this.events.onFrame(uri, bytes);
-    // Release after paint
-    setTimeout(() => {
-      this.frameBusy = false;
-      if (this.pendingUri) {
-        const next = this.pendingUri;
-        this.pendingUri = null;
-        this.emitUri(next, 0);
-      }
-    }, 16);
   }
 
   sendPointer(
@@ -236,11 +283,19 @@ export class DeskLinkClient {
   setQuality(opts: { fps: number; scale: number; jpeg_quality: number }): void {
     if (this.state !== 'streaming') return;
     this.send({ type: 'quality', ...opts });
+    // New quality → force a keyframe so UI updates immediately
+    this.send({ type: 'keyframe' });
+  }
+
+  requestKeyframe(): void {
+    if (this.state !== 'streaming') return;
+    this.send({ type: 'keyframe' });
   }
 
   disconnect(): void {
     this.disposed = true;
     this.stopPing();
+    this.stopFrameWatch();
     try {
       this.ws?.close();
     } catch {
@@ -248,6 +303,9 @@ export class DeskLinkClient {
     }
     this.ws = null;
     this.token = null;
+    this.authSent = false;
+    this.pendingUri = null;
+    this.rafScheduled = false;
     this.setState('idle');
   }
 
@@ -264,13 +322,43 @@ export class DeskLinkClient {
     this.stopPing();
     this.pingTimer = setInterval(() => {
       this.send({ type: 'ping', t: Date.now() });
-    }, 3000);
+    }, 4000);
   }
 
   private stopPing(): void {
     if (this.pingTimer) {
       clearInterval(this.pingTimer);
       this.pingTimer = null;
+    }
+  }
+
+  private startFrameWatch(): void {
+    this.stopFrameWatch();
+    let lastAlert = 0;
+    this.frameWatchTimer = setInterval(() => {
+      if (this.state !== 'streaming' || this.frames > 0) {
+        if (this.frames > 0) {
+          // Still request keyframe if stream stalls after first frame
+          if (this.msSinceLastFrame > 4000) {
+            this.send({ type: 'keyframe' });
+          }
+        }
+        return;
+      }
+      const waited = Math.round((Date.now() - this.connectedAt) / 1000);
+      // Keep asking for a keyframe every 2s until first frame
+      this.send({ type: 'keyframe' });
+      if (waited >= 3 && waited - lastAlert >= 3) {
+        lastAlert = waited;
+        this.events.onFrameTimeout?.(waited);
+      }
+    }, 2000);
+  }
+
+  private stopFrameWatch(): void {
+    if (this.frameWatchTimer) {
+      clearInterval(this.frameWatchTimer);
+      this.frameWatchTimer = null;
     }
   }
 

@@ -18,7 +18,10 @@ export default function App() {
   const [latency, setLatency] = useState<number | null>(null);
   const [status, setStatus] = useState('Idle');
   const [frameCount, setFrameCount] = useState(0);
+  const [waitHint, setWaitHint] = useState<string | null>(null);
   const [clientTick, setClientTick] = useState(0);
+  const qualityRef = useRef<QualityPreset>('balanced');
+  const frameCountTick = useRef(0);
 
   useEffect(() => {
     return () => {
@@ -41,17 +44,26 @@ export default function App() {
     if (state === 'connecting' || state === 'authenticating') {
       setBusy(true);
       setError(null);
+      setWaitHint(null);
     }
     if (state === 'streaming') {
       setBusy(false);
       setSession(true);
       setError(null);
+      setWaitHint('Waiting for first frame from PC…');
       activateKeepAwakeAsync().catch(() => undefined);
+      // Apply quality ASAP once streaming
+      const stream = qualityToStream(qualityRef.current);
+      // Small delay so host stream loop is running
+      setTimeout(() => {
+        clientRef.current?.setQuality(stream);
+      }, 50);
     }
     if (state === 'error') {
       setBusy(false);
       setError(detail || 'Connection failed');
       setSession(false);
+      setWaitHint(null);
       deactivateKeepAwake().catch(() => undefined);
     }
     if (state === 'closed' || state === 'idle') {
@@ -60,27 +72,41 @@ export default function App() {
         setSession(false);
         setFrameUri(null);
         setFrameCount(0);
+        setWaitHint(null);
         deactivateKeepAwake().catch(() => undefined);
       }
     }
   }, []);
 
   const ensureClient = useCallback(() => {
-    // Always recreate callbacks binding
     if (clientRef.current) {
       clientRef.current.disconnect();
       clientRef.current = null;
     }
     const c = new DeskLinkClient({
       onState,
-      onFrame: (uri) => setFrameUri(uri),
+      onFrame: (uri) => {
+        setFrameUri(uri);
+        setWaitHint(null);
+      },
       onScreen: (w, h) => {
         setScreenW(w);
         setScreenH(h);
       },
       onLatency: (ms) => setLatency(ms),
       onMessage: () => undefined,
-      onFrameCount: (n) => setFrameCount(n),
+      onFrameCount: (n) => {
+        // Throttle UI counter updates (every 5 frames) to cut re-renders
+        frameCountTick.current = n;
+        if (n === 1 || n % 5 === 0) {
+          setFrameCount(n);
+        }
+      },
+      onFrameTimeout: (seconds) => {
+        setWaitHint(
+          `No screen after ${seconds}s. Keep host window open, same Wi‑Fi, firewall allows port. Host will keep retrying capture…`,
+        );
+      },
     });
     clientRef.current = c;
     setClientTick((n) => n + 1);
@@ -91,18 +117,11 @@ export default function App() {
     setError(null);
     setFrameUri(null);
     setFrameCount(0);
+    setWaitHint(null);
+    frameCountTick.current = 0;
+    qualityRef.current = quality;
     const c = ensureClient();
     c.connect(host, port, password);
-    const stream = qualityToStream(quality);
-    const started = Date.now();
-    const iv = setInterval(() => {
-      if (c.connectionState === 'streaming') {
-        c.setQuality(stream);
-        clearInterval(iv);
-      } else if (Date.now() - started > 15000) {
-        clearInterval(iv);
-      }
-    }, 200);
   };
 
   const handleDisconnect = () => {
@@ -111,6 +130,7 @@ export default function App() {
     setFrameUri(null);
     setLatency(null);
     setFrameCount(0);
+    setWaitHint(null);
     setBusy(false);
     deactivateKeepAwake().catch(() => undefined);
   };
@@ -129,6 +149,7 @@ export default function App() {
           latencyMs={latency}
           status={status}
           frameCount={frameCount}
+          waitHint={waitHint}
           onDisconnect={handleDisconnect}
         />
       ) : (

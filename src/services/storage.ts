@@ -74,13 +74,14 @@ export function qualityToStream(preset: QualityPreset): {
   scale: number;
   jpeg_quality: number;
 } {
+  // Tuned for single-user iPhone 14 Plus over Wi‑Fi (smaller = faster first frame)
   switch (preset) {
     case 'smooth':
-      return { fps: 22, scale: 0.35, jpeg_quality: 40 };
+      return { fps: 18, scale: 0.30, jpeg_quality: 38 };
     case 'sharp':
-      return { fps: 12, scale: 0.65, jpeg_quality: 70 };
+      return { fps: 10, scale: 0.55, jpeg_quality: 62 };
     case 'balanced':
     default:
-      return { fps: 16, scale: 0.45, jpeg_quality: 55 };
+      return { fps: 14, scale: 0.40, jpeg_quality: 48 };
   }
 }

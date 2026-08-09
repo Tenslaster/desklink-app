@@ -8,14 +8,17 @@ import {
   TextInput,
   KeyboardAvoidingView,
   Platform,
+  ScrollView,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { RemoteCanvas } from '../components/RemoteCanvas';
 import type { DeskLinkClient } from '../services/DeskLinkClient';
+import { colors } from '../theme/colors';
 
 /**
- * Chrome Remote Desktop–style session UI:
- * full-bleed desktop + bottom control bar + text send field + zoom.
+ * Session UI tuned for iPhone (14 Plus etc.):
+ * flex column + safe-area padding so status + controls never sit under
+ * Dynamic Island / home indicator. Canvas fills the middle only.
  */
 type Props = {
   client: DeskLinkClient;
@@ -25,6 +28,7 @@ type Props = {
   latencyMs: number | null;
   status: string;
   frameCount: number;
+  waitHint?: string | null;
   onDisconnect: () => void;
 };
 
@@ -36,6 +40,7 @@ export function SessionScreen({
   latencyMs,
   status,
   frameCount,
+  waitHint,
   onDisconnect,
 }: Props) {
   const insets = useSafeAreaInsets();
@@ -44,11 +49,12 @@ export function SessionScreen({
   const [textMode, setTextMode] = useState(false);
   const [text, setText] = useState('');
 
+  const topPad = Math.max(insets.top, 12);
+  const bottomPad = Math.max(insets.bottom, 10);
+
   const zoomIn = () => setZoom((z) => Math.min(4, Math.round((z + 0.25) * 100) / 100));
   const zoomOut = () => setZoom((z) => Math.max(1, Math.round((z - 0.25) * 100) / 100));
-  const zoomFit = () => {
-    setZoom(1);
-  };
+  const zoomFit = () => setZoom(1);
 
   const sendText = () => {
     const t = text;
@@ -62,48 +68,71 @@ export function SessionScreen({
     setTimeout(() => client.sendKey(key, false), 40);
   };
 
+  const live = !!frameUri;
+  const statusLine = [
+    status,
+    latencyMs != null ? `${latencyMs} ms` : null,
+    frameCount > 0 ? `${frameCount}f` : null,
+    zoom > 1 ? `${Math.round(zoom * 100)}%` : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
   return (
     <View style={styles.root}>
-      <StatusBar hidden />
-      <RemoteCanvas
-        uri={frameUri}
-        client={client}
-        screenW={screenW}
-        screenH={screenH}
-        zoom={zoom}
-        onZoomChange={setZoom}
-      />
+      {/* Keep status bar space via insets — do not absolute-position chrome off-screen */}
+      <StatusBar hidden barStyle="light-content" />
 
-      {/* Top status strip (like CRD connection chip) */}
-      {barOpen ? (
-        <View style={[styles.topChipWrap, { top: Math.max(8, insets.top) }]} pointerEvents="box-none">
-          <View style={styles.topChip}>
-            <View style={[styles.liveDot, !frameUri && styles.liveDotWait]} />
-            <Text style={styles.topChipText} numberOfLines={1}>
-              {status}
-              {latencyMs != null ? ` · ${latencyMs} ms` : ''}
-              {frameCount > 0 ? ` · ${frameCount}f` : ''}
-              {zoom > 1 ? ` · ${Math.round(zoom * 100)}%` : ''}
+      {/* Top safe strip — always on-screen (Dynamic Island / notch) */}
+      <View style={[styles.topBar, { paddingTop: topPad }]}>
+        <View style={styles.topInner}>
+          <View style={[styles.liveDot, live ? styles.liveDotOn : styles.liveDotWait]} />
+          <View style={styles.topTextCol}>
+            <Text style={styles.topTitle} numberOfLines={1}>
+              {live ? 'Live' : 'Waiting for screen'}
             </Text>
+            <Text style={styles.topSub} numberOfLines={1}>
+              {statusLine || '…'}
+            </Text>
+            {!live && waitHint ? (
+              <Text style={styles.topHint} numberOfLines={2}>
+                {waitHint}
+              </Text>
+            ) : null}
           </View>
+          <Pressable style={styles.discChip} onPress={onDisconnect} hitSlop={8}>
+            <Text style={styles.discChipText}>Exit</Text>
+          </Pressable>
         </View>
-      ) : null}
+      </View>
 
+      {/* Desktop canvas — only the middle band, never under chrome */}
+      <View style={styles.canvasHost}>
+        <RemoteCanvas
+          uri={frameUri}
+          client={client}
+          screenW={screenW}
+          screenH={screenH}
+          zoom={zoom}
+          onZoomChange={setZoom}
+          compactWait
+        />
+      </View>
+
+      {/* Bottom controls — paddingBottom = home indicator, content stays above it */}
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         keyboardVerticalOffset={0}
-        style={styles.bottomHost}
-        pointerEvents="box-none"
+        style={[styles.bottomBar, { paddingBottom: bottomPad }]}
       >
-        {/* Text bar — type then Send (Chrome RD keyboard panel feel) */}
         {barOpen && textMode ? (
-          <View style={[styles.textBar, { marginBottom: 8 }]}>
+          <View style={styles.textBar}>
             <TextInput
               style={styles.textInput}
               value={text}
               onChangeText={setText}
-              placeholder="Type text to send to PC…"
-              placeholderTextColor="#9aa0a6"
+              placeholder="Type text for PC…"
+              placeholderTextColor={colors.textMuted}
               autoCorrect={false}
               autoCapitalize="none"
               returnKeyType="send"
@@ -116,9 +145,13 @@ export function SessionScreen({
           </View>
         ) : null}
 
-        {/* Quick keys row when text mode open */}
         {barOpen && textMode ? (
-          <View style={styles.keysRow}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.keysRow}
+            keyboardShouldPersistTaps="handled"
+          >
             {[
               { l: 'Esc', k: 'escape' },
               { l: 'Tab', k: 'tab' },
@@ -133,39 +166,37 @@ export function SessionScreen({
                 <Text style={styles.keyChipText}>{k.l}</Text>
               </Pressable>
             ))}
-          </View>
+          </ScrollView>
         ) : null}
 
-        {/* Main control bar — CRD style pill */}
         {barOpen ? (
-          <View style={[styles.toolbar, { marginBottom: Math.max(10, insets.bottom) }]}>
-            <ToolBtn
-              label="⌨"
-              title="Keyboard"
-              active={textMode}
-              onPress={() => setTextMode((v) => !v)}
-            />
-            <ToolBtn label="−" title="Zoom out" onPress={zoomOut} />
-            <ToolBtn label={`${Math.round(zoom * 100)}%`} title="Fit" onPress={zoomFit} wide />
-            <ToolBtn label="+" title="Zoom in" onPress={zoomIn} />
-            <ToolBtn label="⊡" title="Fit screen" onPress={zoomFit} />
-            <View style={styles.toolbarSep} />
-            <ToolBtn label="✕" title="Disconnect" danger onPress={onDisconnect} />
-          </View>
-        ) : (
-          <Pressable
-            style={[styles.showBar, { marginBottom: Math.max(12, insets.bottom) }]}
-            onPress={() => setBarOpen(true)}
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.toolbarScroll}
+            keyboardShouldPersistTaps="handled"
           >
-            <Text style={styles.showBarText}>Controls</Text>
+            <View style={styles.toolbar}>
+              <ToolBtn
+                label="⌨"
+                title="Keyboard"
+                active={textMode}
+                onPress={() => setTextMode((v) => !v)}
+              />
+              <ToolBtn label="−" title="Zoom out" onPress={zoomOut} />
+              <ToolBtn label={`${Math.round(zoom * 100)}%`} title="Fit" onPress={zoomFit} wide />
+              <ToolBtn label="+" title="Zoom in" onPress={zoomIn} />
+              <ToolBtn label="⊡" title="Fit screen" onPress={zoomFit} />
+              <View style={styles.toolbarSep} />
+              <ToolBtn label="Hide" title="Hide controls" onPress={() => setBarOpen(false)} />
+              <ToolBtn label="✕" title="Disconnect" danger onPress={onDisconnect} />
+            </View>
+          </ScrollView>
+        ) : (
+          <Pressable style={styles.showBar} onPress={() => setBarOpen(true)}>
+            <Text style={styles.showBarText}>Show controls</Text>
           </Pressable>
         )}
-
-        {barOpen ? (
-          <Pressable style={styles.hideHint} onPress={() => setBarOpen(false)}>
-            <Text style={styles.hideHintText}>Hide controls</Text>
-          </Pressable>
-        ) : null}
       </KeyboardAvoidingView>
     </View>
   );
@@ -190,6 +221,7 @@ function ToolBtn({
     <Pressable
       accessibilityLabel={title}
       onPress={onPress}
+      hitSlop={4}
       style={[
         styles.toolBtn,
         wide && styles.toolBtnWide,
@@ -203,69 +235,99 @@ function ToolBtn({
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#202124' },
-  topChipWrap: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    alignItems: 'center',
+  root: {
+    flex: 1,
+    backgroundColor: colors.bg,
   },
-  topChip: {
+  topBar: {
+    backgroundColor: colors.bg,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(255,255,255,0.08)',
+    paddingHorizontal: 12,
+    paddingBottom: 8,
+  },
+  topInner: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    backgroundColor: 'rgba(32,33,36,0.92)',
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 20,
-    maxWidth: '92%',
+    gap: 10,
+    minHeight: 40,
   },
   liveDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#81c995',
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+  },
+  liveDotOn: {
+    backgroundColor: colors.success,
   },
   liveDotWait: {
-    backgroundColor: '#fdd663',
+    backgroundColor: colors.warning,
   },
-  topChipText: {
-    color: '#e8eaed',
+  topTextCol: {
+    flex: 1,
+    minWidth: 0,
+  },
+  topTitle: {
+    color: colors.text,
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  topSub: {
+    color: colors.textMuted,
     fontSize: 12,
-    fontWeight: '600',
+    marginTop: 1,
   },
-  bottomHost: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    alignItems: 'center',
-    paddingHorizontal: 12,
+  topHint: {
+    color: colors.warning,
+    fontSize: 11,
+    marginTop: 2,
+  },
+  discChip: {
+    backgroundColor: 'rgba(242,139,130,0.18)',
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+  },
+  discChipText: {
+    color: colors.danger,
+    fontWeight: '800',
+    fontSize: 13,
+  },
+  canvasHost: {
+    flex: 1,
+    minHeight: 120,
+    backgroundColor: '#111',
+  },
+  bottomBar: {
+    backgroundColor: colors.bg,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(255,255,255,0.08)',
+    paddingTop: 8,
+    paddingHorizontal: 10,
+    gap: 8,
   },
   textBar: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    width: '100%',
-    maxWidth: 720,
-    backgroundColor: 'rgba(32,33,36,0.96)',
-    borderRadius: 28,
-    paddingLeft: 16,
-    paddingRight: 8,
-    paddingVertical: 6,
+    backgroundColor: colors.surface,
+    borderRadius: 22,
+    paddingLeft: 14,
+    paddingRight: 6,
+    paddingVertical: 4,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.08)',
   },
   textInput: {
     flex: 1,
-    color: '#e8eaed',
+    color: colors.text,
     fontSize: 16,
     paddingVertical: 10,
   },
   sendBtn: {
-    backgroundColor: '#8ab4f8',
-    borderRadius: 20,
-    paddingHorizontal: 16,
+    backgroundColor: colors.accent,
+    borderRadius: 18,
+    paddingHorizontal: 14,
     paddingVertical: 10,
   },
   sendBtnText: {
@@ -275,34 +337,36 @@ const styles = StyleSheet.create({
   },
   keysRow: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'center',
+    alignItems: 'center',
     gap: 6,
-    marginBottom: 8,
-    maxWidth: 720,
+    paddingVertical: 2,
   },
   keyChip: {
-    backgroundColor: 'rgba(60,64,67,0.95)',
+    backgroundColor: colors.surfaceAlt,
     borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
   },
   keyChipText: {
-    color: '#e8eaed',
+    color: colors.text,
     fontWeight: '700',
     fontSize: 12,
+  },
+  toolbarScroll: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexGrow: 1,
   },
   toolbar: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    backgroundColor: 'rgba(32,33,36,0.96)',
-    borderRadius: 28,
-    paddingHorizontal: 8,
-    paddingVertical: 6,
+    backgroundColor: colors.surface,
+    borderRadius: 24,
+    paddingHorizontal: 6,
+    paddingVertical: 4,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.08)',
-    maxWidth: '100%',
   },
   toolbarSep: {
     width: 1,
@@ -311,15 +375,15 @@ const styles = StyleSheet.create({
     marginHorizontal: 4,
   },
   toolBtn: {
-    minWidth: 40,
-    height: 40,
-    borderRadius: 20,
+    minWidth: 44,
+    height: 44,
+    borderRadius: 22,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 8,
   },
   toolBtnWide: {
-    minWidth: 56,
+    minWidth: 58,
   },
   toolBtnActive: {
     backgroundColor: 'rgba(138,180,248,0.22)',
@@ -328,31 +392,23 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(242,139,130,0.15)',
   },
   toolBtnText: {
-    color: '#e8eaed',
-    fontSize: 16,
+    color: colors.text,
+    fontSize: 15,
     fontWeight: '700',
   },
   toolBtnTextDanger: {
-    color: '#f28b82',
+    color: colors.danger,
   },
   showBar: {
-    backgroundColor: 'rgba(32,33,36,0.92)',
+    alignSelf: 'center',
+    backgroundColor: colors.surface,
     borderRadius: 20,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
+    paddingHorizontal: 18,
+    paddingVertical: 12,
   },
   showBarText: {
-    color: '#8ab4f8',
+    color: colors.accent,
     fontWeight: '700',
-    fontSize: 13,
-  },
-  hideHint: {
-    marginTop: 4,
-    marginBottom: 2,
-    padding: 4,
-  },
-  hideHintText: {
-    color: '#9aa0a6',
-    fontSize: 11,
+    fontSize: 14,
   },
 });

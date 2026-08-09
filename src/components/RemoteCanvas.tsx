@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useRef } from 'react';
+import React, { memo, useCallback, useMemo, useRef } from 'react';
 import {
   Image,
   LayoutChangeEvent,
@@ -10,7 +10,6 @@ import {
   Animated,
 } from 'react-native';
 import type { DeskLinkClient } from '../services/DeskLinkClient';
-import { colors } from '../theme/colors';
 
 type Props = {
   uri: string | null;
@@ -20,17 +19,26 @@ type Props = {
   /** 1 = fit, >1 zoomed */
   zoom: number;
   onZoomChange?: (z: number) => void;
+  /** When true, wait UI is minimal (parent already shows status). */
+  compactWait?: boolean;
 };
 
 /**
  * Remote desktop surface with letterbox fit + pinch/zoom pan.
  * Touch → host mouse (normalized 0–1 over the visible desktop).
  */
-export function RemoteCanvas({ uri, client, screenW, screenH, zoom, onZoomChange }: Props) {
+function RemoteCanvasImpl({
+  uri,
+  client,
+  screenW,
+  screenH,
+  zoom,
+  onZoomChange,
+  compactWait,
+}: Props) {
   const layout = useRef({ w: 1, h: 1 });
   const content = useRef({ x: 0, y: 0, w: 1, h: 1 });
   const lastNorm = useRef({ x: 0.5, y: 0.5 });
-  const scrolling = useRef(false);
   const pinching = useRef(false);
   const pinchStartDist = useRef(0);
   const pinchStartZoom = useRef(1);
@@ -70,7 +78,6 @@ export function RemoteCanvas({ uri, client, screenW, screenH, zoom, onZoomChange
   const normFromLocation = (lx: number, ly: number) => {
     const c = content.current;
     const z = zoomRef.current;
-    // Undo pan + zoom around center of content rect
     const cx = c.x + c.w / 2;
     const cy = c.y + c.h / 2;
     const ox = panOffset.current.x;
@@ -102,14 +109,12 @@ export function RemoteCanvas({ uri, client, screenW, screenH, zoom, onZoomChange
           const touches = e.nativeEvent.touches;
           if (touches.length >= 2) {
             pinching.current = true;
-            scrolling.current = false;
             pinchStartDist.current = touchDist(e) || 1;
             pinchStartZoom.current = zoomRef.current;
             twoFingerY.current = (touches[0].pageY + touches[1].pageY) / 2;
             return;
           }
           pinching.current = false;
-          scrolling.current = false;
           panStart.current = { ...panOffset.current };
           const { locationX, locationY } = e.nativeEvent;
           const n = normFromLocation(locationX, locationY);
@@ -126,9 +131,8 @@ export function RemoteCanvas({ uri, client, screenW, screenH, zoom, onZoomChange
               const next = Math.max(1, Math.min(4, pinchStartZoom.current * ratio));
               onZoomChange?.(Math.round(next * 20) / 20);
             }
-            // two-finger scroll when zoom ~1
-            if (zoomRef.current <= 1.05) {
-              const midY = (touches[0].pageY + (touches[1]?.pageY ?? touches[0].pageY)) / 2;
+            if (zoomRef.current <= 1.05 && touches.length >= 2) {
+              const midY = (touches[0].pageY + touches[1].pageY) / 2;
               if (twoFingerY.current != null) {
                 const dy = twoFingerY.current - midY;
                 if (Math.abs(dy) > 12) {
@@ -145,7 +149,6 @@ export function RemoteCanvas({ uri, client, screenW, screenH, zoom, onZoomChange
           }
 
           if (zoomRef.current > 1.05) {
-            // pan zoomed desktop
             panOffset.current = {
               x: panStart.current.x + g.dx,
               y: panStart.current.y + g.dy,
@@ -177,7 +180,6 @@ export function RemoteCanvas({ uri, client, screenW, screenH, zoom, onZoomChange
             client?.sendPointer('up', n.x, n.y, { button: 'left' });
           }
           pinching.current = false;
-          scrolling.current = false;
           twoFingerY.current = null;
         },
       }),
@@ -209,7 +211,7 @@ export function RemoteCanvas({ uri, client, screenW, screenH, zoom, onZoomChange
           <View style={styles.placeholder} />
         )}
       </Animated.View>
-      {!uri ? (
+      {!uri && !compactWait ? (
         <View style={styles.waitOverlay} pointerEvents="none">
           <View style={styles.waitPill}>
             <View style={styles.dot} />
@@ -217,9 +219,16 @@ export function RemoteCanvas({ uri, client, screenW, screenH, zoom, onZoomChange
           </View>
         </View>
       ) : null}
+      {!uri && compactWait ? (
+        <View style={styles.waitOverlay} pointerEvents="none">
+          <Text style={styles.waitSoft}>Receiving first frame…</Text>
+        </View>
+      ) : null}
     </View>
   );
 }
+
+export const RemoteCanvas = memo(RemoteCanvasImpl);
 
 const styles = StyleSheet.create({
   wrap: {
@@ -239,9 +248,10 @@ const styles = StyleSheet.create({
     backgroundColor: '#1a1a1a',
   },
   waitOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     alignItems: 'center',
     justifyContent: 'center',
+    paddingHorizontal: 24,
   },
   waitPill: {
     flexDirection: 'row',
@@ -251,6 +261,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderRadius: 24,
+  },
+  waitSoft: {
+    color: '#9aa0a6',
+    fontSize: 13,
+    fontWeight: '600',
   },
   dot: {
     width: 8,
