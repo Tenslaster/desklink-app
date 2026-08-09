@@ -346,8 +346,15 @@ function RemoteCanvasImpl({
             return;
           }
 
-          // Light press → left click under finger
-          if (!cursorDriving.current && isTap(dist, duration)) {
+          // Light press → left click under finger.
+          // Prefer click over a half-started drag: short press + small travel = click
+          // even if MOVE_SLOP was barely crossed (kills jump-without-click).
+          const wantClick =
+            !longFired.current &&
+            isTap(dist, duration) &&
+            (!cursorDriving.current || dist < 36 || duration < 280);
+
+          if (wantClick) {
             const n = normFromPoint(
               locationX,
               locationY,
@@ -356,12 +363,13 @@ function RemoteCanvasImpl({
               panOffset.current,
             );
             cursor.current = n;
+            // Single click message — host places cursor + SendInput/mouse_event click
             const now = Date.now();
             const dt = now - lastTap.current.t;
             const tapDist = Math.hypot(pageX - lastTap.current.x, pageY - lastTap.current.y);
             if (isDoubleTap(dt, tapDist, lastTap.current.t > 0)) {
               client?.sendPointer('click', n.x, n.y, { button: 'left' });
-              setTimeout(() => client?.sendPointer('click', n.x, n.y, { button: 'left' }), 45);
+              setTimeout(() => client?.sendPointer('click', n.x, n.y, { button: 'left' }), 50);
               lastTap.current = { t: 0, x: 0, y: 0 };
               setBadge('Double-click');
             } else {
@@ -369,7 +377,7 @@ function RemoteCanvasImpl({
               lastTap.current = { t: now, x: pageX, y: pageY };
               setBadge('Click');
             }
-            setTimeout(() => setBadge(null), 220);
+            setTimeout(() => setBadge(null), 200);
           }
 
           cursorDriving.current = false;

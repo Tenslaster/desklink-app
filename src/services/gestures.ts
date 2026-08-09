@@ -11,9 +11,15 @@
  *   - Drag at fit → remote scroll
  */
 
-export const MOVE_SLOP_PX = 18;
-export const TAP_SLOP_PX = 30;
-export const TAP_MAX_MS = 500;
+/**
+ * Drag (mouse move) only after a clear slide.
+ * Keep this HIGH so a light press with tiny jitter never becomes a drag
+ * (that was causing jump-without-click).
+ */
+export const MOVE_SLOP_PX = 36;
+/** Light press may jitter — still a click if under this and short enough. */
+export const TAP_SLOP_PX = 40;
+export const TAP_MAX_MS = 600;
 export const LONG_PRESS_MS = 480;
 export const DOUBLE_TAP_MS = 300;
 export const DOUBLE_TAP_SLOP_PX = 36;
