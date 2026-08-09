@@ -20,6 +20,7 @@ export type ClientEvents = {
   onScreen: (width: number, height: number) => void;
   onLatency: (ms: number) => void;
   onMessage: (msg: ServerMsg) => void;
+  onFrameCount?: (n: number) => void;
 };
 
 export class DeskLinkClient {
@@ -27,11 +28,11 @@ export class DeskLinkClient {
   private state: ConnectionState = 'idle';
   private token: string | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
-  private lastPingT = 0;
   private disposed = false;
-  /** Drop intermediate frames if decode is behind */
   private frameBusy = false;
   private pendingUri: string | null = null;
+  private frames = 0;
+  private password = '';
 
   constructor(private readonly events: ClientEvents) {}
 
@@ -39,9 +40,15 @@ export class DeskLinkClient {
     return this.state;
   }
 
+  get frameCount(): number {
+    return this.frames;
+  }
+
   connect(host: string, port: number, password: string): void {
     this.disconnect();
     this.disposed = false;
+    this.frames = 0;
+    this.password = password;
     const url = `ws://${host.trim()}:${port}`;
     this.setState('connecting', url);
 
@@ -53,28 +60,23 @@ export class DeskLinkClient {
       return;
     }
     this.ws = ws;
-    ws.binaryType = 'arraybuffer';
+    try {
+      ws.binaryType = 'arraybuffer';
+    } catch {
+      /* ignore */
+    }
 
     ws.onopen = () => {
       if (this.disposed) return;
       this.setState('authenticating');
-      // Wait for hello; still send auth (server accepts either order after hello)
-      this.send({ type: 'auth', password });
+      // Prefer JSON base64 frames (reliable on React Native)
+      this.send({ type: 'prefer', format: 'json', binary: false });
+      this.send({ type: 'auth', password: this.password });
     };
 
     ws.onmessage = (ev) => {
       if (this.disposed) return;
-      if (typeof ev.data === 'string') {
-        const msg = decodeMsg(ev.data);
-        if (!msg) return;
-        this.handleJson(msg, password);
-        return;
-      }
-      // Binary frame
-      const buf = ev.data as ArrayBuffer;
-      const jpeg = unpackFrame(buf);
-      if (!jpeg) return;
-      this.handleJpeg(jpeg);
+      void this.onMessage(ev.data);
     };
 
     ws.onerror = () => {
@@ -92,28 +94,64 @@ export class DeskLinkClient {
     };
   }
 
-  private handleJson(msg: ServerMsg, password: string): void {
+  private async onMessage(data: unknown): Promise<void> {
+    // Text / JSON control + frame messages
+    if (typeof data === 'string') {
+      const msg = decodeMsg(data);
+      if (!msg) return;
+      this.handleJson(msg);
+      return;
+    }
+
+    // Binary DLK1 or raw JPEG
+    try {
+      let ab: ArrayBuffer | null = null;
+      if (data instanceof ArrayBuffer) {
+        ab = data;
+      } else if (ArrayBuffer.isView(data)) {
+        const v = data as ArrayBufferView;
+        ab = v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength) as ArrayBuffer;
+      } else if (typeof Blob !== 'undefined' && data instanceof Blob) {
+        ab = await data.arrayBuffer();
+      }
+      if (!ab) return;
+      const jpeg = unpackFrame(ab);
+      if (!jpeg) return;
+      this.emitJpeg(jpeg);
+    } catch {
+      /* ignore bad binary */
+    }
+  }
+
+  private handleJson(msg: ServerMsg): void {
     this.events.onMessage(msg);
 
     if (msg.type === 'hello') {
       const h = msg as { screen?: { width: number; height: number } };
       if (h.screen) this.events.onScreen(h.screen.width, h.screen.height);
-      // Re-send auth in case server wasn't ready
       if (this.state === 'authenticating' || this.state === 'connecting') {
-        this.send({ type: 'auth', password });
+        this.send({ type: 'prefer', format: 'json', binary: false });
+        this.send({ type: 'auth', password: this.password });
       }
       return;
     }
 
     if (msg.type === 'auth_ok') {
-      const m = msg as {
-        token?: string;
-        screen?: { width: number; height: number };
-      };
+      const m = msg as { token?: string; screen?: { width: number; height: number } };
       this.token = m.token || null;
       if (m.screen) this.events.onScreen(m.screen.width, m.screen.height);
       this.setState('streaming');
       this.startPing();
+      // Re-assert JSON frames after auth (stream starts on host after auth_ok)
+      this.send({ type: 'prefer', format: 'json', binary: false });
+      return;
+    }
+
+    if (msg.type === 'frame') {
+      const data = (msg as { data?: string }).data;
+      if (typeof data === 'string' && data.length > 0) {
+        this.emitUri(`data:image/jpeg;base64,${data}`, data.length);
+      }
       return;
     }
 
@@ -139,28 +177,32 @@ export class DeskLinkClient {
     }
   }
 
-  private handleJpeg(jpeg: Uint8Array): void {
-    // If UI is busy applying a frame, keep only the latest
-    const uri = jpegBytesToUri(jpeg);
+  private emitJpeg(jpeg: Uint8Array): void {
+    try {
+      this.emitUri(jpegBytesToUri(jpeg), jpeg.byteLength);
+    } catch {
+      /* ignore encode errors */
+    }
+  }
+
+  private emitUri(uri: string, bytes: number): void {
+    this.frames += 1;
+    this.events.onFrameCount?.(this.frames);
     if (this.frameBusy) {
       this.pendingUri = uri;
       return;
     }
     this.frameBusy = true;
-    this.events.onFrame(uri, jpeg.byteLength);
-    // Release on next tick so React can paint
-    queueMicrotask(() => {
+    this.events.onFrame(uri, bytes);
+    // Release after paint
+    setTimeout(() => {
       this.frameBusy = false;
       if (this.pendingUri) {
         const next = this.pendingUri;
         this.pendingUri = null;
-        this.frameBusy = true;
-        this.events.onFrame(next, 0);
-        queueMicrotask(() => {
-          this.frameBusy = false;
-        });
+        this.emitUri(next, 0);
       }
-    });
+    }, 16);
   }
 
   sendPointer(
@@ -188,7 +230,7 @@ export class DeskLinkClient {
 
   sendText(text: string): void {
     if (this.state !== 'streaming' || !text) return;
-    this.send({ type: 'text', text: text.slice(0, 256) });
+    this.send({ type: 'text', text: text.slice(0, 512) });
   }
 
   setQuality(opts: { fps: number; scale: number; jpeg_quality: number }): void {
@@ -221,8 +263,7 @@ export class DeskLinkClient {
   private startPing(): void {
     this.stopPing();
     this.pingTimer = setInterval(() => {
-      this.lastPingT = Date.now();
-      this.send({ type: 'ping', t: this.lastPingT });
+      this.send({ type: 'ping', t: Date.now() });
     }, 3000);
   }
 
