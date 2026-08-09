@@ -1,6 +1,7 @@
 import {
   decodeMsg,
   encodeMsg,
+  frameDataToUri,
   jpegBytesToUri,
   unpackFrame,
   type ServerMsg,
@@ -24,8 +25,7 @@ export type ClientEvents = {
   onFrameTimeout?: (seconds: number) => void;
 };
 
-/** Max move events/sec — keeps host CPU free for 30fps encode */
-const MOVE_HZ = 60;
+const MOVE_HZ = 90;
 const MOVE_MIN_MS = 1000 / MOVE_HZ;
 
 export class DeskLinkClient {
@@ -46,6 +46,16 @@ export class DeskLinkClient {
   private lastMoveAt = 0;
   private pendingMove: { x: number; y: number } | null = null;
   private moveFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Reused pointer payload to cut GC pressure */
+  private readonly moveMsg = {
+    type: 'pointer' as const,
+    action: 'move' as const,
+    x: 0,
+    y: 0,
+    button: 'left',
+    dx: 0,
+    dy: 0,
+  };
 
   constructor(private readonly events: ClientEvents) {}
 
@@ -102,7 +112,13 @@ export class DeskLinkClient {
 
     ws.onmessage = (ev) => {
       if (this.disposed) return;
-      void this.onMessage(ev.data);
+      const data = ev.data;
+      if (typeof data === 'string') {
+        const msg = decodeMsg(data);
+        if (msg) this.handleJson(msg);
+        return;
+      }
+      void this.onBinary(data);
     };
 
     ws.onerror = () => {
@@ -116,8 +132,7 @@ export class DeskLinkClient {
       this.clearMoveFlush();
       if (this.disposed) return;
       if (this.state !== 'error') {
-        const reason = ev.reason || (ev.code ? `code ${ev.code}` : 'Disconnected');
-        this.setState('closed', reason);
+        this.setState('closed', ev.reason || (ev.code ? `code ${ev.code}` : 'Disconnected'));
       }
       this.ws = null;
     };
@@ -133,14 +148,7 @@ export class DeskLinkClient {
     this.send({ type: 'auth', password: this.password });
   }
 
-  private async onMessage(data: unknown): Promise<void> {
-    if (typeof data === 'string') {
-      const msg = decodeMsg(data);
-      if (!msg) return;
-      this.handleJson(msg);
-      return;
-    }
-
+  private async onBinary(data: unknown): Promise<void> {
     try {
       let ab: ArrayBuffer | null = null;
       if (data instanceof ArrayBuffer) {
@@ -154,78 +162,70 @@ export class DeskLinkClient {
       if (!ab) return;
       const jpeg = unpackFrame(ab);
       if (!jpeg) return;
-      this.emitJpeg(jpeg);
+      this.emitUri(jpegBytesToUri(jpeg), jpeg.byteLength);
     } catch {
       /* ignore */
     }
   }
 
   private handleJson(msg: ServerMsg): void {
-    this.events.onMessage(msg);
-
-    if (msg.type === 'hello') {
-      const h = msg as { screen?: { width: number; height: number } };
-      if (h.screen) this.events.onScreen(h.screen.width, h.screen.height);
-      if (this.state === 'authenticating' || this.state === 'connecting') {
-        this.sendPreferJson();
-        if (!this.token) {
-          this.authSent = false;
-          this.sendAuthOnce();
-        }
-      }
-      return;
-    }
-
-    if (msg.type === 'auth_ok') {
-      const m = msg as { token?: string; screen?: { width: number; height: number } };
-      this.token = m.token || null;
-      if (m.screen) this.events.onScreen(m.screen.width, m.screen.height);
-      this.connectedAt = Date.now();
-      this.lastFrameAt = 0;
-      this.setState('streaming');
-      this.startPing();
-      this.startFrameWatch();
-      this.sendPreferJson();
-      this.send({ type: 'keyframe' });
-      return;
-    }
-
+    // Frame first — hottest path
     if (msg.type === 'frame') {
       const data = (msg as { data?: string }).data;
       if (typeof data === 'string' && data.length > 0) {
-        const uri = data.startsWith('data:') ? data : `data:image/jpeg;base64,${data}`;
-        this.emitUri(uri, data.length);
+        this.emitUri(frameDataToUri(data), data.length);
       }
       return;
     }
 
-    if (msg.type === 'auth_fail') {
-      const m = msg as { message?: string };
-      this.setState('error', m.message || 'Authentication failed');
-      this.ws?.close();
-      return;
-    }
+    this.events.onMessage(msg);
 
-    if (msg.type === 'error') {
-      const m = msg as { message?: string };
-      this.setState('error', m.message || 'Server error');
-      return;
-    }
-
-    if (msg.type === 'pong') {
-      const m = msg as { t?: number };
-      if (typeof m.t === 'number') {
-        this.events.onLatency(Math.max(0, Date.now() - m.t));
+    switch (msg.type) {
+      case 'hello': {
+        const h = msg as { screen?: { width: number; height: number } };
+        if (h.screen) this.events.onScreen(h.screen.width, h.screen.height);
+        if (this.state === 'authenticating' || this.state === 'connecting') {
+          this.sendPreferJson();
+          if (!this.token) {
+            this.authSent = false;
+            this.sendAuthOnce();
+          }
+        }
+        return;
       }
-      return;
-    }
-  }
-
-  private emitJpeg(jpeg: Uint8Array): void {
-    try {
-      this.emitUri(jpegBytesToUri(jpeg), jpeg.byteLength);
-    } catch {
-      /* ignore */
+      case 'auth_ok': {
+        const m = msg as { token?: string; screen?: { width: number; height: number } };
+        this.token = m.token || null;
+        if (m.screen) this.events.onScreen(m.screen.width, m.screen.height);
+        this.connectedAt = Date.now();
+        this.lastFrameAt = 0;
+        this.setState('streaming');
+        this.startPing();
+        this.startFrameWatch();
+        this.sendPreferJson();
+        this.send({ type: 'keyframe' });
+        return;
+      }
+      case 'auth_fail': {
+        const m = msg as { message?: string };
+        this.setState('error', m.message || 'Authentication failed');
+        this.ws?.close();
+        return;
+      }
+      case 'error': {
+        const m = msg as { message?: string };
+        this.setState('error', m.message || 'Server error');
+        return;
+      }
+      case 'pong': {
+        const m = msg as { t?: number };
+        if (typeof m.t === 'number') {
+          this.events.onLatency(Math.max(0, Date.now() - m.t));
+        }
+        return;
+      }
+      default:
+        return;
     }
   }
 
@@ -263,7 +263,6 @@ export class DeskLinkClient {
     const nx = clamp01(x);
     const ny = clamp01(y);
 
-    // Throttle pure moves; always flush latest position
     if (action === 'move') {
       this.pendingMove = { x: nx, y: ny };
       const now = Date.now();
@@ -279,7 +278,6 @@ export class DeskLinkClient {
       return;
     }
 
-    // Button / click / scroll: flush pending move first so position is correct
     this.flushMove();
     this.send({
       type: 'pointer',
@@ -297,15 +295,10 @@ export class DeskLinkClient {
     const { x, y } = this.pendingMove;
     this.pendingMove = null;
     this.lastMoveAt = Date.now();
-    this.send({
-      type: 'pointer',
-      action: 'move',
-      x,
-      y,
-      button: 'left',
-      dx: 0,
-      dy: 0,
-    });
+    // Reuse object shape
+    this.moveMsg.x = x;
+    this.moveMsg.y = y;
+    this.send(this.moveMsg as unknown as Record<string, unknown>);
   }
 
   private clearMoveFlush(): void {
@@ -368,7 +361,7 @@ export class DeskLinkClient {
     this.stopPing();
     this.pingTimer = setInterval(() => {
       this.send({ type: 'ping', t: Date.now() });
-    }, 4000);
+    }, 5000);
   }
 
   private stopPing(): void {
@@ -384,9 +377,7 @@ export class DeskLinkClient {
     this.frameWatchTimer = setInterval(() => {
       if (this.state !== 'streaming') return;
       if (this.frames > 0) {
-        if (this.msSinceLastFrame > 4000) {
-          this.send({ type: 'keyframe' });
-        }
+        if (this.msSinceLastFrame > 4000) this.send({ type: 'keyframe' });
         return;
       }
       const waited = Math.round((Date.now() - this.connectedAt) / 1000);
@@ -413,5 +404,5 @@ export class DeskLinkClient {
 
 function clamp01(n: number): number {
   if (Number.isNaN(n)) return 0;
-  return Math.max(0, Math.min(1, n));
+  return n < 0 ? 0 : n > 1 ? 1 : n;
 }
