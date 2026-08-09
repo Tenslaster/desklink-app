@@ -86,21 +86,56 @@ assert(g.resolveFingerMode(2, 2, 1, false) === 'scroll', '2f zoomed → scroll (
 assert(g.resolveFingerMode(2, 2, 1.05, false) === 'pinch', '2f scale change → pinch');
 assert(g.resolveFingerMode(2, 1, 1, true) === 'pinch', 'pinch stays locked');
 
-// Zoom follows cursor → pan keeps cursor at screen center
-const follow = g.panToFollowCursor(
-  { x: 0.5, y: 0.5 },
-  { x: 0, y: 0, w: 200, h: 100 },
-  { w: 200, h: 100 },
-  2,
-);
-assert(Math.abs(follow.x) < 0.01 && Math.abs(follow.y) < 0.01, 'center cursor → zero pan');
-const followCorner = g.panToFollowCursor(
-  { x: 0, y: 0 },
-  { x: 0, y: 0, w: 200, h: 100 },
-  { w: 200, h: 100 },
-  2,
-);
-assert(followCorner.x > 0 && followCorner.y > 0, 'top-left cursor → positive pan to center');
+// ── Human viewport: zoom keeps remote mouse on phone center ──
+const layout = { w: 390, h: 720 }; // iPhone-ish
+// Letterboxed 16:9 content inside portrait phone
+let cw = layout.w;
+let ch = layout.w / (16 / 9);
+if (ch > layout.h) {
+  ch = layout.h;
+  cw = layout.h * (16 / 9);
+}
+const content = {
+  x: (layout.w - cw) / 2,
+  y: (layout.h - ch) / 2,
+  w: cw,
+  h: ch,
+};
+
+// Fit: stable letterbox, no cursor chase
+const fitErrs = g.assertViewportHuman({ x: 0.1, y: 0.9 }, content, layout, 1);
+assert(fitErrs.length === 0, `fit stable letterbox: ${fitErrs.join('; ') || 'ok'}`);
+
+// Zoomed: every cursor position must land on phone center
+const spots = [
+  [0.5, 0.5],
+  [0, 0],
+  [1, 1],
+  [0.2, 0.8],
+  [0.9, 0.15],
+];
+let allCenter = true;
+for (const [x, y] of spots) {
+  for (const z of [1.5, 2, 3, 4]) {
+    const errs = g.assertViewportHuman({ x, y }, content, layout, z, 1.0);
+    if (errs.length) {
+      allCenter = false;
+      console.log(`  FAIL  zoom=${z} cursor=${x},${y}: ${errs.join('; ')}`);
+    }
+  }
+}
+assert(allCenter, 'zoomed: remote mouse always at phone center (all spots/zooms)');
+
+// Moving the mouse while zoomed must change left/top (desktop slides under crosshair)
+const vpA = g.viewportForCursor({ x: 0.3, y: 0.4 }, content, layout, 2);
+const vpB = g.viewportForCursor({ x: 0.7, y: 0.4 }, content, layout, 2);
+assert(vpA.left > vpB.left, 'drag mouse right → desktop shifts left (camera follows)');
+assert(Math.abs(vpA.width - vpB.width) < 0.01, 'same zoom → same size');
+
+// Projected cursor is phone center
+const scr = g.projectCursorToScreen({ x: 0.2, y: 0.8 }, g.viewportForCursor({ x: 0.2, y: 0.8 }, content, layout, 2.5));
+assert(Math.abs(scr.x - layout.w / 2) < 1 && Math.abs(scr.y - layout.h / 2) < 1, 'projectCursorToScreen = center');
+
 assert(g.scrollStepsFromDelta(40) > 0, 'finger up → scroll up steps');
 assert(g.scrollStepsFromDelta(-40) < 0, 'finger down → scroll down steps');
 

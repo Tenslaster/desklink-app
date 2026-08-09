@@ -144,34 +144,109 @@ export function scrollStepsFromDelta(dyPx: number): number {
 }
 
 /**
- * Pan the zoomed stage so the remote cursor sits at the phone screen center.
- * RN transforms scale around the view center, then translate is applied first
- * in our transform list (translate then scale) — wait: order is
- *   [translateX, translateY, scale]
- * which means scale is applied first in matrix multiplication (rightmost),
- * then translate. In RN, transforms apply right-to-left: scale then translate.
- * So screenPos = pan + (local - center) * zoom + center
- * For cursor local point L to land on layout center C:
- *   C = pan + (L - C) * zoom + C  =>  pan = -(L - C) * zoom
+ * Where to place the desktop image so a human always sees what they're controlling.
+ *
+ * Fit (zoom ≈ 1): letterbox the full desktop (normal remote view).
+ * Zoomed: enlarge the desktop and pin the *remote mouse* to the phone's
+ * center — no RN scale-origin math, just absolute left/top/size.
+ *
+ * Screen position of cursor = (left + cursor.x * width, top + cursor.y * height)
+ * We choose left/top so that equals (layout.w/2, layout.h/2).
  */
+export type DesktopViewport = {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+};
+
+export function viewportForCursor(
+  cursor: { x: number; y: number },
+  content: { x: number; y: number; w: number; h: number },
+  layout: { w: number; h: number },
+  zoom: number,
+): DesktopViewport {
+  const z = clampZoom(zoom);
+  const cw = Math.max(1, content.w);
+  const ch = Math.max(1, content.h);
+  // Not laid out yet — avoid wild coordinates
+  if (layout.w < 16 || layout.h < 16) {
+    return { left: 0, top: 0, width: cw, height: ch };
+  }
+  // Fit: full desktop letterboxed (ignore cursor — humans expect a stable desktop)
+  if (z <= VIEW_PAN_MIN_ZOOM) {
+    return {
+      left: content.x,
+      top: content.y,
+      width: cw,
+      height: ch,
+    };
+  }
+  const nx = Math.max(0, Math.min(1, cursor.x));
+  const ny = Math.max(0, Math.min(1, cursor.y));
+  const width = cw * z;
+  const height = ch * z;
+  return {
+    left: layout.w / 2 - nx * width,
+    top: layout.h / 2 - ny * height,
+    width,
+    height,
+  };
+}
+
+/** Where the remote cursor lands on the phone after applying a viewport. */
+export function projectCursorToScreen(
+  cursor: { x: number; y: number },
+  vp: DesktopViewport,
+): { x: number; y: number } {
+  return {
+    x: vp.left + Math.max(0, Math.min(1, cursor.x)) * vp.width,
+    y: vp.top + Math.max(0, Math.min(1, cursor.y)) * vp.height,
+  };
+}
+
+/**
+ * Human check: when zoomed, projected cursor must sit on the phone center.
+ * When fit, desktop must match letterbox content rect.
+ */
+export function assertViewportHuman(
+  cursor: { x: number; y: number },
+  content: { x: number; y: number; w: number; h: number },
+  layout: { w: number; h: number },
+  zoom: number,
+  eps: number = 1.5,
+): string[] {
+  const errs: string[] = [];
+  const vp = viewportForCursor(cursor, content, layout, zoom);
+  const z = clampZoom(zoom);
+  if (z <= VIEW_PAN_MIN_ZOOM) {
+    if (Math.abs(vp.left - content.x) > eps) errs.push(`fit left ${vp.left}≠${content.x}`);
+    if (Math.abs(vp.top - content.y) > eps) errs.push(`fit top ${vp.top}≠${content.y}`);
+    if (Math.abs(vp.width - content.w) > eps) errs.push(`fit w ${vp.width}≠${content.w}`);
+    if (Math.abs(vp.height - content.h) > eps) errs.push(`fit h ${vp.height}≠${content.h}`);
+    return errs;
+  }
+  const scr = projectCursorToScreen(cursor, vp);
+  const cx = layout.w / 2;
+  const cy = layout.h / 2;
+  if (Math.abs(scr.x - cx) > eps) errs.push(`cursor screen x ${scr.x.toFixed(1)}≠center ${cx}`);
+  if (Math.abs(scr.y - cy) > eps) errs.push(`cursor screen y ${scr.y.toFixed(1)}≠center ${cy}`);
+  if (Math.abs(vp.width - content.w * z) > eps) errs.push('width not content*zoom');
+  if (Math.abs(vp.height - content.h * z) > eps) errs.push('height not content*zoom');
+  return errs;
+}
+
+/** @deprecated Use viewportForCursor — kept so old imports don't explode. */
 export function panToFollowCursor(
   cursor: { x: number; y: number },
   content: { x: number; y: number; w: number; h: number },
   layout: { w: number; h: number },
   zoom: number,
 ): { x: number; y: number } {
-  if (zoom <= VIEW_PAN_MIN_ZOOM) {
-    return { x: 0, y: 0 };
-  }
-  const z = Math.max(0.001, zoom);
-  const lx = content.x + cursor.x * content.w;
-  const ly = content.y + cursor.y * content.h;
-  const cx = layout.w / 2;
-  const cy = layout.h / 2;
-  return {
-    x: -(lx - cx) * z,
-    y: -(ly - cy) * z,
-  };
+  const vp = viewportForCursor(cursor, content, layout, zoom);
+  if (zoom <= VIEW_PAN_MIN_ZOOM) return { x: 0, y: 0 };
+  // Approximate legacy pan (not used by canvas anymore)
+  return { x: vp.left - content.x, y: vp.top - content.y };
 }
 
 /** Light press on phone → left click (forgiving jitter). */

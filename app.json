@@ -2,14 +2,14 @@
   "expo": {
     "name": "DeskLink",
     "slug": "desklink",
-    "version": "1.0.15",
+    "version": "1.0.16",
     "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.cedri.desklink",
-      "buildNumber": "18",
+      "buildNumber": "19",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
         "NSLocalNetworkUsageDescription": "DeskLink connects to your PC on the local network for remote desktop control.",
