@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -13,13 +13,14 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { RemoteCanvas } from '../components/RemoteCanvas';
 import type { DeskLinkClient } from '../services/DeskLinkClient';
+import {
+  loadGestureHintSeen,
+  markGestureHintSeen,
+  qualityToStream,
+  type QualityPreset,
+} from '../services/storage';
 import { colors } from '../theme/colors';
 
-/**
- * Session UI tuned for iPhone (14 Plus etc.):
- * flex column + safe-area padding so status + controls never sit under
- * Dynamic Island / home indicator. Canvas fills the middle only.
- */
 type Props = {
   client: DeskLinkClient;
   frameUri: string | null;
@@ -29,8 +30,16 @@ type Props = {
   status: string;
   frameCount: number;
   waitHint?: string | null;
+  qualityPreset?: QualityPreset;
   onDisconnect: () => void;
+  onQualityChange?: (q: QualityPreset) => void;
 };
+
+const QUALITY_OPTS: { id: QualityPreset; label: string }[] = [
+  { id: 'smooth', label: '36fps' },
+  { id: 'balanced', label: '30fps' },
+  { id: 'sharp', label: 'Sharp' },
+];
 
 export function SessionScreen({
   client,
@@ -41,20 +50,39 @@ export function SessionScreen({
   status,
   frameCount,
   waitHint,
+  qualityPreset = 'balanced',
   onDisconnect,
+  onQualityChange,
 }: Props) {
   const insets = useSafeAreaInsets();
   const [zoom, setZoom] = useState(1);
   const [barOpen, setBarOpen] = useState(true);
   const [textMode, setTextMode] = useState(false);
   const [text, setText] = useState('');
+  const [quality, setQuality] = useState<QualityPreset>(qualityPreset);
+  const [showHint, setShowHint] = useState(false);
 
   const topPad = Math.max(insets.top, 12);
   const bottomPad = Math.max(insets.bottom, 10);
 
+  useEffect(() => {
+    loadGestureHintSeen().then((seen) => {
+      if (!seen) {
+        setShowHint(true);
+        markGestureHintSeen();
+      }
+    });
+  }, []);
+
   const zoomIn = () => setZoom((z) => Math.min(4, Math.round((z + 0.25) * 100) / 100));
   const zoomOut = () => setZoom((z) => Math.max(1, Math.round((z - 0.25) * 100) / 100));
   const zoomFit = () => setZoom(1);
+
+  const applyQuality = (q: QualityPreset) => {
+    setQuality(q);
+    client.setQuality(qualityToStream(q));
+    onQualityChange?.(q);
+  };
 
   const sendText = () => {
     const t = text;
@@ -69,9 +97,13 @@ export function SessionScreen({
   };
 
   const live = !!frameUri;
+  const latLabel =
+    latencyMs == null ? null : latencyMs < 40 ? 'Excellent' : latencyMs < 80 ? 'Good' : 'Fair';
+
   const statusLine = [
     status,
     latencyMs != null ? `${latencyMs} ms` : null,
+    latLabel,
     frameCount > 0 ? `${frameCount}f` : null,
     zoom > 1 ? `${Math.round(zoom * 100)}%` : null,
   ]
@@ -80,16 +112,14 @@ export function SessionScreen({
 
   return (
     <View style={styles.root}>
-      {/* Keep status bar space via insets — do not absolute-position chrome off-screen */}
       <StatusBar hidden barStyle="light-content" />
 
-      {/* Top safe strip — always on-screen (Dynamic Island / notch) */}
       <View style={[styles.topBar, { paddingTop: topPad }]}>
         <View style={styles.topInner}>
           <View style={[styles.liveDot, live ? styles.liveDotOn : styles.liveDotWait]} />
           <View style={styles.topTextCol}>
             <Text style={styles.topTitle} numberOfLines={1}>
-              {live ? 'Live' : 'Waiting for screen'}
+              {live ? 'DeskLink · Live' : 'Waiting for screen'}
             </Text>
             <Text style={styles.topSub} numberOfLines={1}>
               {statusLine || '…'}
@@ -104,9 +134,27 @@ export function SessionScreen({
             <Text style={styles.discChipText}>Exit</Text>
           </Pressable>
         </View>
+
+        {/* Live quality chips — switch mid-session without reconnect */}
+        {live && barOpen ? (
+          <View style={styles.qualityRow}>
+            {QUALITY_OPTS.map((q) => {
+              const on = quality === q.id;
+              return (
+                <Pressable
+                  key={q.id}
+                  onPress={() => applyQuality(q.id)}
+                  style={[styles.qChip, on && styles.qChipOn]}
+                >
+                  <Text style={[styles.qChipText, on && styles.qChipTextOn]}>{q.label}</Text>
+                </Pressable>
+              );
+            })}
+            <Text style={styles.qHint}>≥30 fps · DXGI GPU</Text>
+          </View>
+        ) : null}
       </View>
 
-      {/* Desktop canvas — only the middle band, never under chrome */}
       <View style={styles.canvasHost}>
         <RemoteCanvas
           uri={frameUri}
@@ -116,10 +164,10 @@ export function SessionScreen({
           zoom={zoom}
           onZoomChange={setZoom}
           compactWait
+          showGestureHint={showHint && live}
         />
       </View>
 
-      {/* Bottom controls — paddingBottom = home indicator, content stays above it */}
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         keyboardVerticalOffset={0}
@@ -235,10 +283,7 @@ function ToolBtn({
 }
 
 const styles = StyleSheet.create({
-  root: {
-    flex: 1,
-    backgroundColor: colors.bg,
-  },
+  root: { flex: 1, backgroundColor: colors.bg },
   topBar: {
     backgroundColor: colors.bg,
     borderBottomWidth: StyleSheet.hairlineWidth,
@@ -252,52 +297,43 @@ const styles = StyleSheet.create({
     gap: 10,
     minHeight: 40,
   },
-  liveDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-  },
-  liveDotOn: {
-    backgroundColor: colors.success,
-  },
-  liveDotWait: {
-    backgroundColor: colors.warning,
-  },
-  topTextCol: {
-    flex: 1,
-    minWidth: 0,
-  },
-  topTitle: {
-    color: colors.text,
-    fontSize: 15,
-    fontWeight: '700',
-  },
-  topSub: {
-    color: colors.textMuted,
-    fontSize: 12,
-    marginTop: 1,
-  },
-  topHint: {
-    color: colors.warning,
-    fontSize: 11,
-    marginTop: 2,
-  },
+  liveDot: { width: 10, height: 10, borderRadius: 5 },
+  liveDotOn: { backgroundColor: colors.success },
+  liveDotWait: { backgroundColor: colors.warning },
+  topTextCol: { flex: 1, minWidth: 0 },
+  topTitle: { color: colors.text, fontSize: 15, fontWeight: '700' },
+  topSub: { color: colors.textMuted, fontSize: 12, marginTop: 1 },
+  topHint: { color: colors.warning, fontSize: 11, marginTop: 2 },
   discChip: {
     backgroundColor: 'rgba(242,139,130,0.18)',
     borderRadius: 16,
     paddingHorizontal: 14,
     paddingVertical: 8,
   },
-  discChipText: {
-    color: colors.danger,
-    fontWeight: '800',
-    fontSize: 13,
+  discChipText: { color: colors.danger, fontWeight: '800', fontSize: 13 },
+  qualityRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 8,
+    flexWrap: 'wrap',
   },
-  canvasHost: {
-    flex: 1,
-    minHeight: 120,
-    backgroundColor: '#111',
+  qChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 12,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
+  qChipOn: {
+    borderColor: colors.accent,
+    backgroundColor: 'rgba(138,180,248,0.15)',
+  },
+  qChipText: { color: colors.textMuted, fontSize: 11, fontWeight: '700' },
+  qChipTextOn: { color: colors.accent },
+  qHint: { color: colors.textMuted, fontSize: 10, marginLeft: 4 },
+  canvasHost: { flex: 1, minHeight: 120, backgroundColor: '#0e0e10' },
   bottomBar: {
     backgroundColor: colors.bg,
     borderTopWidth: StyleSheet.hairlineWidth,
@@ -318,45 +354,23 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.08)',
   },
-  textInput: {
-    flex: 1,
-    color: colors.text,
-    fontSize: 16,
-    paddingVertical: 10,
-  },
+  textInput: { flex: 1, color: colors.text, fontSize: 16, paddingVertical: 10 },
   sendBtn: {
     backgroundColor: colors.accent,
     borderRadius: 18,
     paddingHorizontal: 14,
     paddingVertical: 10,
   },
-  sendBtnText: {
-    color: '#202124',
-    fontWeight: '800',
-    fontSize: 14,
-  },
-  keysRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingVertical: 2,
-  },
+  sendBtnText: { color: '#202124', fontWeight: '800', fontSize: 14 },
+  keysRow: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 2 },
   keyChip: {
     backgroundColor: colors.surfaceAlt,
     borderRadius: 8,
     paddingHorizontal: 12,
     paddingVertical: 10,
   },
-  keyChipText: {
-    color: colors.text,
-    fontWeight: '700',
-    fontSize: 12,
-  },
-  toolbarScroll: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexGrow: 1,
-  },
+  keyChipText: { color: colors.text, fontWeight: '700', fontSize: 12 },
+  toolbarScroll: { alignItems: 'center', justifyContent: 'center', flexGrow: 1 },
   toolbar: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -382,23 +396,11 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 8,
   },
-  toolBtnWide: {
-    minWidth: 58,
-  },
-  toolBtnActive: {
-    backgroundColor: 'rgba(138,180,248,0.22)',
-  },
-  toolBtnDanger: {
-    backgroundColor: 'rgba(242,139,130,0.15)',
-  },
-  toolBtnText: {
-    color: colors.text,
-    fontSize: 15,
-    fontWeight: '700',
-  },
-  toolBtnTextDanger: {
-    color: colors.danger,
-  },
+  toolBtnWide: { minWidth: 58 },
+  toolBtnActive: { backgroundColor: 'rgba(138,180,248,0.22)' },
+  toolBtnDanger: { backgroundColor: 'rgba(242,139,130,0.15)' },
+  toolBtnText: { color: colors.text, fontSize: 15, fontWeight: '700' },
+  toolBtnTextDanger: { color: colors.danger },
   showBar: {
     alignSelf: 'center',
     backgroundColor: colors.surface,
@@ -406,9 +408,5 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
     paddingVertical: 12,
   },
-  showBarText: {
-    color: colors.accent,
-    fontWeight: '700',
-    fontSize: 14,
-  },
+  showBarText: { color: colors.accent, fontWeight: '700', fontSize: 14 },
 });

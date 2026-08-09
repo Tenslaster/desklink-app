@@ -20,6 +20,7 @@ export default function App() {
   const [frameCount, setFrameCount] = useState(0);
   const [waitHint, setWaitHint] = useState<string | null>(null);
   const [clientTick, setClientTick] = useState(0);
+  const [qualityPreset, setQualityPreset] = useState<QualityPreset>('balanced');
   const qualityRef = useRef<QualityPreset>('balanced');
   const frameCountTick = useRef(0);
 
@@ -52,12 +53,10 @@ export default function App() {
       setError(null);
       setWaitHint('Waiting for first frame from PC…');
       activateKeepAwakeAsync().catch(() => undefined);
-      // Apply quality ASAP once streaming
       const stream = qualityToStream(qualityRef.current);
-      // Small delay so host stream loop is running
       setTimeout(() => {
         clientRef.current?.setQuality(stream);
-      }, 50);
+      }, 40);
     }
     if (state === 'error') {
       setBusy(false);
@@ -96,15 +95,14 @@ export default function App() {
       onLatency: (ms) => setLatency(ms),
       onMessage: () => undefined,
       onFrameCount: (n) => {
-        // Throttle UI counter updates (every 5 frames) to cut re-renders
         frameCountTick.current = n;
-        if (n === 1 || n % 5 === 0) {
+        if (n === 1 || n % 8 === 0) {
           setFrameCount(n);
         }
       },
       onFrameTimeout: (seconds) => {
         setWaitHint(
-          `No screen after ${seconds}s. Keep host window open, same Wi‑Fi, firewall allows port. Host will keep retrying capture…`,
+          `No screen after ${seconds}s. Keep host open, same Wi‑Fi, firewall allows port.`,
         );
       },
     });
@@ -120,6 +118,7 @@ export default function App() {
     setWaitHint(null);
     frameCountTick.current = 0;
     qualityRef.current = quality;
+    setQualityPreset(quality);
     const c = ensureClient();
     c.connect(host, port, password);
   };
@@ -150,6 +149,11 @@ export default function App() {
           status={status}
           frameCount={frameCount}
           waitHint={waitHint}
+          qualityPreset={qualityPreset}
+          onQualityChange={(q) => {
+            qualityRef.current = q;
+            setQualityPreset(q);
+          }}
           onDisconnect={handleDisconnect}
         />
       ) : (

@@ -21,9 +21,12 @@ export type ClientEvents = {
   onLatency: (ms: number) => void;
   onMessage: (msg: ServerMsg) => void;
   onFrameCount?: (n: number) => void;
-  /** Fired when connected but no frame arrived for too long */
   onFrameTimeout?: (seconds: number) => void;
 };
+
+/** Max move events/sec — keeps host CPU free for 30fps encode */
+const MOVE_HZ = 60;
+const MOVE_MIN_MS = 1000 / MOVE_HZ;
 
 export class DeskLinkClient {
   private ws: WebSocket | null = null;
@@ -32,7 +35,6 @@ export class DeskLinkClient {
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private frameWatchTimer: ReturnType<typeof setInterval> | null = null;
   private disposed = false;
-  /** Coalesce frames to one paint per animation frame */
   private pendingUri: string | null = null;
   private pendingBytes = 0;
   private rafScheduled = false;
@@ -41,6 +43,9 @@ export class DeskLinkClient {
   private connectedAt = 0;
   private lastFrameAt = 0;
   private authSent = false;
+  private lastMoveAt = 0;
+  private pendingMove: { x: number; y: number } | null = null;
+  private moveFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private readonly events: ClientEvents) {}
 
@@ -67,6 +72,8 @@ export class DeskLinkClient {
     this.connectedAt = 0;
     this.pendingUri = null;
     this.rafScheduled = false;
+    this.lastMoveAt = 0;
+    this.pendingMove = null;
 
     const cleanHost = host.trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
     const url = `ws://${cleanHost}:${port}`;
@@ -89,7 +96,6 @@ export class DeskLinkClient {
     ws.onopen = () => {
       if (this.disposed) return;
       this.setState('authenticating');
-      // JSON frames only — binary DLK1 is unreliable on React Native WebSocket
       this.sendPreferJson();
       this.sendAuthOnce();
     };
@@ -107,6 +113,7 @@ export class DeskLinkClient {
     ws.onclose = (ev) => {
       this.stopPing();
       this.stopFrameWatch();
+      this.clearMoveFlush();
       if (this.disposed) return;
       if (this.state !== 'error') {
         const reason = ev.reason || (ev.code ? `code ${ev.code}` : 'Disconnected');
@@ -149,7 +156,7 @@ export class DeskLinkClient {
       if (!jpeg) return;
       this.emitJpeg(jpeg);
     } catch {
-      /* ignore bad binary */
+      /* ignore */
     }
   }
 
@@ -159,10 +166,8 @@ export class DeskLinkClient {
     if (msg.type === 'hello') {
       const h = msg as { screen?: { width: number; height: number } };
       if (h.screen) this.events.onScreen(h.screen.width, h.screen.height);
-      // Host sends hello first; auth if we haven't yet (or reconnect path)
       if (this.state === 'authenticating' || this.state === 'connecting') {
         this.sendPreferJson();
-        // Allow re-auth on hello if previous auth was before hello arrived without response
         if (!this.token) {
           this.authSent = false;
           this.sendAuthOnce();
@@ -180,7 +185,6 @@ export class DeskLinkClient {
       this.setState('streaming');
       this.startPing();
       this.startFrameWatch();
-      // Ensure JSON path + ask host for an immediate keyframe
       this.sendPreferJson();
       this.send({ type: 'keyframe' });
       return;
@@ -189,7 +193,6 @@ export class DeskLinkClient {
     if (msg.type === 'frame') {
       const data = (msg as { data?: string }).data;
       if (typeof data === 'string' && data.length > 0) {
-        // Avoid double "data:image..." prefix if host ever sends full URI
         const uri = data.startsWith('data:') ? data : `data:image/jpeg;base64,${data}`;
         this.emitUri(uri, data.length);
       }
@@ -222,7 +225,7 @@ export class DeskLinkClient {
     try {
       this.emitUri(jpegBytesToUri(jpeg), jpeg.byteLength);
     } catch {
-      /* ignore encode errors */
+      /* ignore */
     }
   }
 
@@ -230,7 +233,6 @@ export class DeskLinkClient {
     this.frames += 1;
     this.lastFrameAt = Date.now();
     this.events.onFrameCount?.(this.frames);
-    // Keep latest frame only — drop intermediate ones under load
     this.pendingUri = uri;
     this.pendingBytes = bytes;
     if (this.rafScheduled) return;
@@ -244,7 +246,6 @@ export class DeskLinkClient {
       this.pendingBytes = 0;
       this.events.onFrame(next, b);
     };
-    // requestAnimationFrame is not always available in RN; setTimeout(0) is fine
     if (typeof requestAnimationFrame === 'function') {
       requestAnimationFrame(flush);
     } else {
@@ -259,15 +260,60 @@ export class DeskLinkClient {
     extra?: { button?: string; dx?: number; dy?: number },
   ): void {
     if (this.state !== 'streaming') return;
+    const nx = clamp01(x);
+    const ny = clamp01(y);
+
+    // Throttle pure moves; always flush latest position
+    if (action === 'move') {
+      this.pendingMove = { x: nx, y: ny };
+      const now = Date.now();
+      const wait = MOVE_MIN_MS - (now - this.lastMoveAt);
+      if (wait <= 0) {
+        this.flushMove();
+      } else if (!this.moveFlushTimer) {
+        this.moveFlushTimer = setTimeout(() => {
+          this.moveFlushTimer = null;
+          this.flushMove();
+        }, wait);
+      }
+      return;
+    }
+
+    // Button / click / scroll: flush pending move first so position is correct
+    this.flushMove();
     this.send({
       type: 'pointer',
       action,
-      x: clamp01(x),
-      y: clamp01(y),
+      x: nx,
+      y: ny,
       button: extra?.button || 'left',
       dx: extra?.dx || 0,
       dy: extra?.dy || 0,
     });
+  }
+
+  private flushMove(): void {
+    if (!this.pendingMove || this.state !== 'streaming') return;
+    const { x, y } = this.pendingMove;
+    this.pendingMove = null;
+    this.lastMoveAt = Date.now();
+    this.send({
+      type: 'pointer',
+      action: 'move',
+      x,
+      y,
+      button: 'left',
+      dx: 0,
+      dy: 0,
+    });
+  }
+
+  private clearMoveFlush(): void {
+    if (this.moveFlushTimer) {
+      clearTimeout(this.moveFlushTimer);
+      this.moveFlushTimer = null;
+    }
+    this.pendingMove = null;
   }
 
   sendKey(key: string, pressed: boolean): void {
@@ -283,7 +329,6 @@ export class DeskLinkClient {
   setQuality(opts: { fps: number; scale: number; jpeg_quality: number }): void {
     if (this.state !== 'streaming') return;
     this.send({ type: 'quality', ...opts });
-    // New quality → force a keyframe so UI updates immediately
     this.send({ type: 'keyframe' });
   }
 
@@ -296,6 +341,7 @@ export class DeskLinkClient {
     this.disposed = true;
     this.stopPing();
     this.stopFrameWatch();
+    this.clearMoveFlush();
     try {
       this.ws?.close();
     } catch {
@@ -336,17 +382,14 @@ export class DeskLinkClient {
     this.stopFrameWatch();
     let lastAlert = 0;
     this.frameWatchTimer = setInterval(() => {
-      if (this.state !== 'streaming' || this.frames > 0) {
-        if (this.frames > 0) {
-          // Still request keyframe if stream stalls after first frame
-          if (this.msSinceLastFrame > 4000) {
-            this.send({ type: 'keyframe' });
-          }
+      if (this.state !== 'streaming') return;
+      if (this.frames > 0) {
+        if (this.msSinceLastFrame > 4000) {
+          this.send({ type: 'keyframe' });
         }
         return;
       }
       const waited = Math.round((Date.now() - this.connectedAt) / 1000);
-      // Keep asking for a keyframe every 2s until first frame
       this.send({ type: 'keyframe' });
       if (waited >= 3 && waited - lastAlert >= 3) {
         lastAlert = waited;

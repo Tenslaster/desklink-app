@@ -7,6 +7,7 @@ const KEYS = {
   password: 'desklink_password',
   remember: 'desklink_remember',
   qualityPreset: 'desklink_quality',
+  gestureHintSeen: 'desklink_gesture_hint',
 } as const;
 
 export type QualityPreset = 'smooth' | 'balanced' | 'sharp';
@@ -69,19 +70,41 @@ export async function saveConnection(conn: SavedConnection): Promise<void> {
   }
 }
 
+export async function loadGestureHintSeen(): Promise<boolean> {
+  try {
+    return (await AsyncStorage.getItem(KEYS.gestureHintSeen)) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export async function markGestureHintSeen(): Promise<void> {
+  try {
+    await AsyncStorage.setItem(KEYS.gestureHintSeen, '1');
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * All presets target ≥30 fps on LAN for GTX 1050 Ti DXGI + i7-7700.
+ * Higher scale/quality = sharper; GPU handles capture via DXGI.
+ */
 export function qualityToStream(preset: QualityPreset): {
   fps: number;
   scale: number;
   jpeg_quality: number;
 } {
-  // Tuned for single-user iPhone 14 Plus over Wi‑Fi (smaller = faster first frame)
   switch (preset) {
     case 'smooth':
-      return { fps: 18, scale: 0.30, jpeg_quality: 38 };
+      // Fluid motion, still readable
+      return { fps: 36, scale: 0.52, jpeg_quality: 58 };
     case 'sharp':
-      return { fps: 10, scale: 0.55, jpeg_quality: 62 };
+      // Max clarity, hard floor 30 fps
+      return { fps: 30, scale: 0.75, jpeg_quality: 74 };
     case 'balanced':
     default:
-      return { fps: 14, scale: 0.40, jpeg_quality: 48 };
+      // Default: sharp enough text + solid 30 fps
+      return { fps: 30, scale: 0.62, jpeg_quality: 66 };
   }
 }
