@@ -61,6 +61,17 @@ function assert(cond, name) {
 
 console.log('\n=== DeskLink gesture policy tests ===\n');
 
+// Enterprise trackpad rules
+assert(g.clickMovesCursor() === false, 'click/tap never moves cursor');
+assert(g.shouldStartCursorMove(5) === false, 'small finger travel → no cursor move');
+assert(g.shouldStartCursorMove(20) === true, 'past slop → cursor may move');
+const cur0 = { x: 0.5, y: 0.5 };
+const dlt = g.trackpadDelta(100, 0, 400, 300, 1);
+const cur1 = g.applyTrackpadMove(cur0, dlt.dx, dlt.dy);
+assert(cur1.x > 0.5 && cur1.y === 0.5, 'trackpad drag right increases x only');
+assert(g.isTap(5, 120) === true, 'tap does not count as drag');
+assert(g.isTap(40, 120) === false, 'drag past slop is not a tap');
+
 // 1 finger never pans
 assert(g.oneFingerPansView() === false, 'oneFingerPansView() is always false');
 assert(g.resolveFingerMode(1, 1, 1) === 'mouse', '1 finger @ fit → mouse');
